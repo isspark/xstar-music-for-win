@@ -54,6 +54,13 @@
             </Style.Triggers>
         </Style>
 
+        <!-- CD mode: shared right-click menu (a new instance per attach) -->
+        <ContextMenu x:Key="CdMenu" x:Shared="False" Opened="CdMenu_Opened">
+            <MenuItem Header="显示歌词" Click="CdLyricsToggle_Click"/>
+            <MenuItem Header="设置" Click="CdSettings_Click"/>
+            <MenuItem Header="退出 CD 唱片模式" Click="ExitCdMode_Click"/>
+        </ContextMenu>
+
         <!-- ===== Song row ===== -->
         <DataTemplate x:Key="SongTemplate">
             <Grid Height="50">
@@ -249,13 +256,8 @@
 
                 <!-- CD record mode: clickable left / centre / right regions over the disc -->
                 <Grid x:Name="DiscClickZones" HorizontalAlignment="Center" VerticalAlignment="Center"
-                      Width="408" Height="408" Visibility="Collapsed">
-                    <Grid.ContextMenu>
-                        <ContextMenu>
-                            <MenuItem Header="设置" Click="CdSettings_Click"/>
-                            <MenuItem Header="退出 CD 唱片模式" Click="ExitCdMode_Click"/>
-                        </ContextMenu>
-                    </Grid.ContextMenu>
+                      Width="408" Height="408" Visibility="Collapsed"
+                      ContextMenu="{StaticResource CdMenu}">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="*"/>
@@ -264,6 +266,25 @@
                     <Border Grid.Column="0" Style="{StaticResource DiscZone}" ToolTip="上一首" MouseLeftButtonUp="DiscPrev_Click"/>
                     <Border Grid.Column="1" Style="{StaticResource DiscZone}" ToolTip="播放 / 暂停" MouseLeftButtonUp="DiscPlay_Click"/>
                     <Border Grid.Column="2" Style="{StaticResource DiscZone}" ToolTip="下一首" MouseLeftButtonUp="DiscNext_Click"/>
+                </Grid>
+
+                <!-- CD record mode: lyrics shown above the disc -->
+                <Grid x:Name="CdLyricsOverlay" Visibility="Collapsed" Background="Transparent" ContextMenu="{StaticResource CdMenu}">
+                    <DockPanel Margin="20,22,20,18">
+                        <StackPanel DockPanel.Dock="Top" Margin="0,0,0,10">
+                            <TextBlock x:Name="CdTitleText" Text="还没有歌曲" FontSize="20" FontWeight="Bold"
+                                       TextAlignment="Center" TextTrimming="CharacterEllipsis"
+                                       Foreground="{DynamicResource TextFillColorPrimaryBrush}">
+                                <TextBlock.Effect><DropShadowEffect BlurRadius="12" ShadowDepth="0" Opacity="0.6" Color="#000000"/></TextBlock.Effect>
+                            </TextBlock>
+                            <TextBlock x:Name="CdSubText" Text="" FontSize="12" TextAlignment="Center"
+                                       TextTrimming="CharacterEllipsis" Margin="0,4,0,0"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+                        </StackPanel>
+                        <ScrollViewer x:Name="CdLyricsView" VerticalScrollBarVisibility="Auto" Background="Transparent" Padding="0,4,0,20">
+                            <StackPanel x:Name="CdLyricsPanel" HorizontalAlignment="Center"/>
+                        </ScrollViewer>
+                    </DockPanel>
                 </Grid>
             </Grid>
 

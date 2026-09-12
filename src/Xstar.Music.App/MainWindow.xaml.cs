@@ -44,6 +44,8 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
     private string? _page; // null = album, otherwise "playlist" / "lyrics"
     private readonly List<LyricLine> _lyricLines = new();
     private readonly List<TextBlock> _lyricBlocks = new();
+    private readonly List<TextBlock> _cdLyricBlocks = new();
+    private bool _cdLyrics;
     private double _lyricsFontSize = 14;
     private bool _dimLyrics = true;
     private bool _discRotation = true;
@@ -371,6 +373,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
                 _playbackMode = state?.PlaybackMode ?? PlaybackMode.Sequential;
                 _lyricsFontSize = state?.LyricsFontSize is > 0 ? state.LyricsFontSize : 14;
                 _dimLyrics = state?.DimLyrics ?? true;
+                _cdLyrics = state?.CdLyrics ?? false;
                 _discRotation = state?.DiscRotation ?? true;
                 _displayMode = state?.DisplayMode ?? "normal";
                 _discSize = state?.DiscSize is > 0 ? state.DiscSize : 1.2;
@@ -413,6 +416,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
                 PlaybackMode = _playbackMode,
                 LyricsFontSize = _lyricsFontSize,
                 DimLyrics = _dimLyrics,
+                CdLyrics = _cdLyrics,
                 DiscRotation = _discRotation,
                 DisplayMode = _displayMode,
                 DiscSize = _discSize,
@@ -566,6 +570,8 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 
         TitleText.Text = song.Title;
         SubText.Text = string.IsNullOrWhiteSpace(song.Album) ? song.Artist : $"{song.Artist} · {song.Album}";
+        CdTitleText.Text = song.Title;
+        CdSubText.Text = song.Artist;
         var artwork = ArtworkLoader.LoadForSong(song);
         QualityText.Text = song.Quality;
         var spec = BuildMetaText(song);
@@ -812,8 +818,19 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 
         ApplyCdWindow(cd);
         ApplyCdChrome(cd);
+        ApplyCdLyrics();
         UpdateFrameClip();
         UpdateDiscRotation();
+    }
+
+    /// <summary>Shows the lyric overlay above the CD (title at top, scrolling lyrics below).</summary>
+    private void ApplyCdLyrics()
+    {
+        var cd = string.Equals(_displayMode, "cd", StringComparison.OrdinalIgnoreCase);
+        var show = cd && _cdLyrics;
+        CdLyricsOverlay.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+        NowPlayingInfo.Visibility = show ? Visibility.Collapsed : Visibility.Visible;
+        if (show) UpdateLyricHighlight(force: true);
     }
 
     /// <summary>Removes the OS window frame (Windows 11 border + rounded corners) so no edge is drawn.</summary>
@@ -922,6 +939,20 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
     {
         _settingsSection = "appearance";
         Settings_Click(sender, e);
+    }
+
+    private void CdMenu_Opened(object sender, RoutedEventArgs e)
+    {
+        if (sender is ContextMenu menu && menu.Items.Count > 0 && menu.Items[0] is MenuItem item)
+            item.Header = _cdLyrics ? "隐藏歌词" : "显示歌词";
+    }
+
+    private void CdLyricsToggle_Click(object sender, RoutedEventArgs e)
+    {
+        _cdLyrics = !_cdLyrics;
+        if (_cdLyrics) RenderLyrics();
+        ApplyCdLyrics();
+        SaveSettings();
     }
 
     private void ViewMode_Click(object sender, RoutedEventArgs e)
@@ -1205,17 +1236,15 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         try { File.Delete(_lyricsProvider.CachePath(songId)); } catch { }
         _lyricLines.Clear();
         _lyricLines.Add(new LyricLine(0, "正在获取歌词…"));
-        LyricsPanel.Children.Clear();
-        _lyricBlocks.Clear();
+        ClearLyricBlocks();
         BuildLyricBlocks();
         await LoadOnlineLyricsAsync(songId);
     }
 
     private void RenderLyrics()
     {
-        LyricsPanel.Children.Clear();
+        ClearLyricBlocks();
         _lyricLines.Clear();
-        _lyricBlocks.Clear();
         if (_currentIndex < 0) return;
         var song = _songs[_currentIndex].Song;
         LyricsHead.Text = $"{song.Title} · {song.Artist}";
@@ -1245,24 +1274,38 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         catch (System.Text.DecoderFallbackException) { return System.Text.Encoding.GetEncoding("GB18030").GetString(bytes); }
     }
 
+    private void ClearLyricBlocks()
+    {
+        LyricsPanel.Children.Clear();
+        CdLyricsPanel.Children.Clear();
+        _lyricBlocks.Clear();
+        _cdLyricBlocks.Clear();
+    }
+
     private void BuildLyricBlocks()
     {
         foreach (var line in _lyricLines)
         {
-            var block = new TextBlock
-            {
-                Text = line.Text,
-                Foreground = ResBrush("TextMutedBrush"),
-                FontSize = _lyricsFontSize,
-                Margin = new Thickness(8, 2, 8, 2),
-                MaxWidth = 760,
-                TextWrapping = TextWrapping.Wrap,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                TextAlignment = TextAlignment.Center
-            };
-            LyricsPanel.Children.Add(block);
-            _lyricBlocks.Add(block);
+            _lyricBlocks.Add(CreateLyricBlock(line, LyricsPanel));
+            _cdLyricBlocks.Add(CreateLyricBlock(line, CdLyricsPanel));
         }
+    }
+
+    private TextBlock CreateLyricBlock(LyricLine line, Panel host)
+    {
+        var block = new TextBlock
+        {
+            Text = line.Text,
+            Foreground = ResBrush("TextMutedBrush"),
+            FontSize = _lyricsFontSize,
+            Margin = new Thickness(8, 2, 8, 2),
+            MaxWidth = 760,
+            TextWrapping = TextWrapping.Wrap,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            TextAlignment = TextAlignment.Center
+        };
+        host.Children.Add(block);
+        return block;
     }
 
     private async Task LoadOnlineLyricsAsync(string songId)
@@ -1275,8 +1318,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
             if (_currentIndex < 0 || _songs[_currentIndex].Song.Id != songId) return;
             _lyricLines.Clear();
             _lyricLines.AddRange(lines);
-            LyricsPanel.Children.Clear();
-            _lyricBlocks.Clear();
+            ClearLyricBlocks();
             BuildLyricBlocks();
             UpdateLyricHighlight(force: true);
         }
@@ -1294,13 +1336,21 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         for (var i = 0; i < _lyricBlocks.Count; i++)
         {
             var active = i == current;
-            _lyricBlocks[i].Foreground = active ? accent : muted;
-            _lyricBlocks[i].FontSize = active ? _lyricsFontSize * 1.25 : _lyricsFontSize;
-            _lyricBlocks[i].FontWeight = active ? FontWeights.SemiBold : FontWeights.Normal;
-            _lyricBlocks[i].Opacity = active || !_dimLyrics ? 1 : .5;
+            StyleLyricBlock(_lyricBlocks[i], active, accent, muted);
+            if (i < _cdLyricBlocks.Count) StyleLyricBlock(_cdLyricBlocks[i], active, accent, muted);
         }
         if (current < _lyricBlocks.Count && LyricsPage.Visibility == Visibility.Visible && _player.Snapshot.IsPlaying)
             _lyricBlocks[current].BringIntoView();
+        if (current < _cdLyricBlocks.Count && CdLyricsOverlay.Visibility == Visibility.Visible && _player.Snapshot.IsPlaying)
+            _cdLyricBlocks[current].BringIntoView();
+    }
+
+    private void StyleLyricBlock(TextBlock block, bool active, Brush accent, Brush muted)
+    {
+        block.Foreground = active ? accent : muted;
+        block.FontSize = active ? _lyricsFontSize * 1.25 : _lyricsFontSize;
+        block.FontWeight = active ? FontWeights.SemiBold : FontWeights.Normal;
+        block.Opacity = active || !_dimLyrics ? 1 : .5;
     }
 
     /* ===================== online search ===================== */
@@ -1922,6 +1972,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         public long PositionMs { get; set; }
         public double LyricsFontSize { get; set; } = 14;
         public bool DimLyrics { get; set; } = true;
+        public bool CdLyrics { get; set; }
         public bool DiscRotation { get; set; } = true;
         public string DisplayMode { get; set; } = "normal";
         public double DiscSize { get; set; } = 1.2;
