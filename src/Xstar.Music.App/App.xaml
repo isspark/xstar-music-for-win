@@ -14,6 +14,22 @@
             <FontFamily x:Key="IconFont">Segoe Fluent Icons</FontFamily>
             <SolidColorBrush x:Key="FavoriteBrush" Color="#F06A9A"/>
 
+            <!-- Translucent page chrome (default = dark palette; ThemeManager swaps these per theme) -->
+            <SolidColorBrush x:Key="PageOverlayBrush" Color="#B80B0C10"/>
+            <SolidColorBrush x:Key="PagePanelBrush" Color="#1AFFFFFF"/>
+
+            <!-- Quality badges (default = dark palette; ThemeManager swaps these per theme) -->
+            <SolidColorBrush x:Key="QualityNormalBgBrush" Color="#1FFFFFFF"/>
+            <SolidColorBrush x:Key="QualityNormalFgBrush" Color="#B9C0D0"/>
+            <SolidColorBrush x:Key="QualityHighBgBrush" Color="#263B82F6"/>
+            <SolidColorBrush x:Key="QualityHighFgBrush" Color="#8FB8FF"/>
+            <SolidColorBrush x:Key="QualityLosslessBgBrush" Color="#2634D399"/>
+            <SolidColorBrush x:Key="QualityLosslessFgBrush" Color="#6EE7B7"/>
+            <SolidColorBrush x:Key="QualityHiresBgBrush" Color="#26F59E0B"/>
+            <SolidColorBrush x:Key="QualityHiresFgBrush" Color="#FCD34D"/>
+            <SolidColorBrush x:Key="QualityOnlineBgBrush" Color="#266E8BFF"/>
+            <SolidColorBrush x:Key="QualityOnlineFgBrush" Color="#A9BBFF"/>
+
             <Style x:Key="SectionCard" TargetType="Border">
                 <Setter Property="Background" Value="{DynamicResource CardBackgroundFillColorDefaultBrush}"/>
                 <Setter Property="BorderBrush" Value="{DynamicResource CardStrokeColorDefaultBrush}"/>

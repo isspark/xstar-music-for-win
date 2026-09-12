@@ -30,6 +30,23 @@ public static class ThemeManager
         new("blossom", "樱粉", Color.FromRgb(0xE8, 0x54, 0x8B), ThemeMode.Light, WindowBackdropType.Acrylic, "玫瑰粉 · 温柔"),
     };
 
+    // Theme-aware brush palette: (resource key, dark hex, light hex). Swapped on every theme change.
+    private static readonly (string Key, string Dark, string Light)[] ThemeBrushPalette =
+    {
+        ("PageOverlayBrush", "#B80B0C10", "#C7F6F7FB"),
+        ("PagePanelBrush", "#1AFFFFFF", "#0F000000"),
+        ("QualityNormalBgBrush", "#1FFFFFFF", "#12000000"),
+        ("QualityNormalFgBrush", "#B9C0D0", "#4B5563"),
+        ("QualityHighBgBrush", "#263B82F6", "#1A3B82F6"),
+        ("QualityHighFgBrush", "#8FB8FF", "#1D4ED8"),
+        ("QualityLosslessBgBrush", "#2634D399", "#1A16A34A"),
+        ("QualityLosslessFgBrush", "#6EE7B7", "#15803D"),
+        ("QualityHiresBgBrush", "#26F59E0B", "#1AF59E0B"),
+        ("QualityHiresFgBrush", "#FCD34D", "#B45309"),
+        ("QualityOnlineBgBrush", "#266E8BFF", "#1A6E8BFF"),
+        ("QualityOnlineFgBrush", "#A9BBFF", "#4338CA"),
+    };
+
     private static readonly ThemePreset Fallback = Presets[0];
     private static ThemeMode _mode = ThemeMode.System;
     private static ThemePreset _preset = Fallback;
@@ -92,7 +109,19 @@ public static class ThemeManager
         try { ApplicationThemeManager.Apply(theme, WindowBackdropType.None, false); }
         catch { try { ApplicationThemeManager.Apply(theme, WindowBackdropType.None); } catch { } }
         ApplyAccentCore(AccentColor);
+        ApplyThemeBrushes(IsLight);
         Changed?.Invoke();
+    }
+
+    private static void ApplyThemeBrushes(bool light)
+    {
+        if (Application.Current is not { } app) return;
+        foreach (var (key, dark, lightHex) in ThemeBrushPalette)
+        {
+            var brush = new SolidColorBrush((Color)ColorConverter.ConvertFromString(light ? lightHex : dark));
+            brush.Freeze();
+            app.Resources[key] = brush;
+        }
     }
 
     private static void ApplyAccentCore(Color color)

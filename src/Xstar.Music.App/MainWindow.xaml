@@ -18,8 +18,51 @@
 
         <GridLength x:Key="ColIndex">34</GridLength>
         <GridLength x:Key="ColFav">30</GridLength>
+        <GridLength x:Key="ColQuality">74</GridLength>
         <GridLength x:Key="ColFormat">60</GridLength>
         <GridLength x:Key="ColDuration">56</GridLength>
+
+        <!-- Quality badge: colour-coded by the song's classified quality -->
+        <Style x:Key="QualityBadge" TargetType="Border">
+            <Setter Property="Background" Value="{DynamicResource QualityNormalBgBrush}"/>
+            <Setter Property="TextElement.Foreground" Value="{DynamicResource QualityNormalFgBrush}"/>
+            <Setter Property="CornerRadius" Value="4"/>
+            <Setter Property="Padding" Value="8,2"/>
+            <Setter Property="Margin" Value="0,0,10,0"/>
+            <Setter Property="HorizontalAlignment" Value="Left"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding Song.Quality}" Value="高清">
+                    <Setter Property="Background" Value="{DynamicResource QualityHighBgBrush}"/>
+                    <Setter Property="TextElement.Foreground" Value="{DynamicResource QualityHighFgBrush}"/>
+                </DataTrigger>
+                <DataTrigger Binding="{Binding Song.Quality}" Value="无损">
+                    <Setter Property="Background" Value="{DynamicResource QualityLosslessBgBrush}"/>
+                    <Setter Property="TextElement.Foreground" Value="{DynamicResource QualityLosslessFgBrush}"/>
+                </DataTrigger>
+                <DataTrigger Binding="{Binding Song.Quality}" Value="Hi-Res">
+                    <Setter Property="Background" Value="{DynamicResource QualityHiresBgBrush}"/>
+                    <Setter Property="TextElement.Foreground" Value="{DynamicResource QualityHiresFgBrush}"/>
+                </DataTrigger>
+                <DataTrigger Binding="{Binding Song.Quality}" Value="在线·可下载">
+                    <Setter Property="Background" Value="{DynamicResource QualityOnlineBgBrush}"/>
+                    <Setter Property="TextElement.Foreground" Value="{DynamicResource QualityOnlineFgBrush}"/>
+                </DataTrigger>
+                <DataTrigger Binding="{Binding Song.Quality}" Value="在线·试听">
+                    <Setter Property="Background" Value="{DynamicResource QualityOnlineBgBrush}"/>
+                    <Setter Property="TextElement.Foreground" Value="{DynamicResource QualityOnlineFgBrush}"/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
+        <!-- Thin row divider used by the playlist -->
+        <Style x:Key="RowDivider" TargetType="Border">
+            <Setter Property="Height" Value="1"/>
+            <Setter Property="VerticalAlignment" Value="Bottom"/>
+            <Setter Property="Background" Value="{DynamicResource CardStrokeColorDefaultBrush}"/>
+            <Setter Property="Opacity" Value="0.55"/>
+            <Setter Property="IsHitTestVisible" Value="False"/>
+        </Style>
 
         <!-- icon-only ui:Button (sized to match the window caption buttons) -->
         <Style x:Key="IconBtn" TargetType="{x:Type ui:Button}" BasedOn="{StaticResource {x:Type ui:Button}}">
@@ -68,7 +111,7 @@
                     <ColumnDefinition Width="{StaticResource ColIndex}"/>
                     <ColumnDefinition Width="{StaticResource ColFav}"/>
                     <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="{StaticResource ColQuality}"/>
                     <ColumnDefinition Width="{StaticResource ColFormat}"/>
                     <ColumnDefinition Width="{StaticResource ColDuration}"/>
                 </Grid.ColumnDefinitions>
@@ -89,25 +132,94 @@
                     <TextBlock Text="{Binding Title}" Foreground="{DynamicResource TextFillColorPrimaryBrush}" FontSize="13" TextTrimming="CharacterEllipsis"/>
                     <TextBlock Text="{Binding Artist}" Foreground="{DynamicResource TextFillColorTertiaryBrush}" FontSize="11" TextTrimming="CharacterEllipsis" Margin="0,1,0,0"/>
                 </StackPanel>
-                <Border Grid.Column="3" Background="{DynamicResource ControlFillColorDefaultBrush}" CornerRadius="4" Padding="9,2" Margin="0,0,10,0" VerticalAlignment="Center">
-                    <TextBlock Text="{Binding Song.Quality}" Foreground="{DynamicResource TextFillColorSecondaryBrush}" FontSize="10"/>
+                <Border Grid.Column="3" Style="{StaticResource QualityBadge}">
+                    <TextBlock Text="{Binding Song.Quality}" FontSize="10" Foreground="{Binding (TextElement.Foreground), RelativeSource={RelativeSource AncestorType=Border}}"/>
                 </Border>
                 <TextBlock Grid.Column="4" Text="{Binding Format}" Foreground="{DynamicResource TextFillColorSecondaryBrush}" FontSize="10.5" VerticalAlignment="Center" HorizontalAlignment="Center"/>
                 <TextBlock Grid.Column="5" Text="{Binding DurationText}" Foreground="{DynamicResource TextFillColorTertiaryBrush}" FontSize="11" VerticalAlignment="Center" HorizontalAlignment="Right" Margin="0,0,14,0"/>
             </Grid>
         </DataTemplate>
 
+        <!-- ===== Playlist row: title + artist on one line, divider underneath ===== -->
+        <DataTemplate x:Key="PlaylistSongTemplate">
+            <Grid Height="46">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="{StaticResource ColIndex}"/>
+                    <ColumnDefinition Width="{StaticResource ColFav}"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="{StaticResource ColQuality}"/>
+                    <ColumnDefinition Width="{StaticResource ColFormat}"/>
+                    <ColumnDefinition Width="{StaticResource ColDuration}"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" Text="{Binding DisplayIndex}" Foreground="{DynamicResource TextFillColorTertiaryBrush}" FontSize="11.5" VerticalAlignment="Center" HorizontalAlignment="Right" Margin="0,0,10,0"/>
+                <TextBlock Grid.Column="1" Text="{Binding FavoriteGlyph}" FontFamily="{StaticResource IconFont}" FontSize="13" VerticalAlignment="Center" HorizontalAlignment="Center">
+                    <TextBlock.Style>
+                        <Style TargetType="TextBlock">
+                            <Setter Property="Foreground" Value="{DynamicResource TextFillColorTertiaryBrush}"/>
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsFavorite}" Value="True">
+                                    <Setter Property="Foreground" Value="{StaticResource FavoriteBrush}"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </TextBlock.Style>
+                </TextBlock>
+                <TextBlock Grid.Column="2" VerticalAlignment="Center" Margin="6,0,12,0" FontSize="13" TextTrimming="CharacterEllipsis">
+                    <Run Text="{Binding Title, Mode=OneWay}" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorPrimaryBrush}"/>
+                    <Run Text="&#160;&#160;" Foreground="{DynamicResource TextFillColorTertiaryBrush}"/>
+                    <Run Text="{Binding Artist, Mode=OneWay}" FontSize="11.5" Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+                </TextBlock>
+                <Border Grid.Column="3" Style="{StaticResource QualityBadge}">
+                    <TextBlock Text="{Binding Song.Quality}" FontSize="10" Foreground="{Binding (TextElement.Foreground), RelativeSource={RelativeSource AncestorType=Border}}"/>
+                </Border>
+                <TextBlock Grid.Column="4" Text="{Binding Format}" Foreground="{DynamicResource TextFillColorSecondaryBrush}" FontSize="10.5" VerticalAlignment="Center" HorizontalAlignment="Center"/>
+                <TextBlock Grid.Column="5" Text="{Binding DurationText}" Foreground="{DynamicResource TextFillColorTertiaryBrush}" FontSize="11" VerticalAlignment="Center" HorizontalAlignment="Right" Margin="0,0,14,0"/>
+                <Border Grid.Column="0" Grid.ColumnSpan="6" Style="{StaticResource RowDivider}"/>
+            </Grid>
+        </DataTemplate>
+
         <!-- ===== Album / artist card ===== -->
         <DataTemplate x:Key="AlbumCardTemplate">
-            <ui:CardControl Margin="0,0,14,14" Width="152" Padding="12" Cursor="Hand">
-                <StackPanel>
-                    <Border CornerRadius="8" Height="126" Background="{DynamicResource ControlFillColorSecondaryBrush}" ClipToBounds="True">
-                        <Image Source="{Binding ArtworkPath, Converter={StaticResource PathToImage}}" Stretch="UniformToFill"/>
-                    </Border>
-                    <TextBlock Text="{Binding Name}" Foreground="{DynamicResource TextFillColorPrimaryBrush}" FontSize="12.5" FontWeight="SemiBold" Margin="0,10,0,0" TextTrimming="CharacterEllipsis"/>
-                    <TextBlock Text="{Binding Subtitle}" Foreground="{DynamicResource TextFillColorTertiaryBrush}" FontSize="11" Margin="0,2,0,0" TextTrimming="CharacterEllipsis"/>
-                </StackPanel>
-            </ui:CardControl>
+            <Border Margin="0,0,14,14" Width="152" Height="152" CornerRadius="10" Cursor="Hand" BorderThickness="0">
+                <Border.Style>
+                    <Style TargetType="Border">
+                        <Setter Property="Background" Value="{DynamicResource ControlFillColorSecondaryBrush}"/>
+                        <Style.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="{DynamicResource ControlFillColorTertiaryBrush}"/>
+                            </Trigger>
+                        </Style.Triggers>
+                    </Style>
+                </Border.Style>
+                <Grid>
+                    <Grid.Clip>
+                        <RectangleGeometry Rect="0,0,152,152" RadiusX="10" RadiusY="10"/>
+                    </Grid.Clip>
+                    <TextBlock Text="&#xEC4F;" FontFamily="{StaticResource IconFont}" FontSize="44"
+                               Foreground="{DynamicResource TextFillColorTertiaryBrush}"
+                               HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False"/>
+                    <Rectangle>
+                        <Rectangle.Fill>
+                            <ImageBrush ImageSource="{Binding ArtworkPath, Converter={StaticResource PathToImage}}" Stretch="UniformToFill"/>
+                        </Rectangle.Fill>
+                    </Rectangle>
+                    <Rectangle VerticalAlignment="Bottom" Height="76">
+                        <Rectangle.Fill>
+                            <LinearGradientBrush StartPoint="0.5,0" EndPoint="0.5,1">
+                                <GradientStop Color="#00000000" Offset="0"/>
+                                <GradientStop Color="#B3000000" Offset="1"/>
+                            </LinearGradientBrush>
+                        </Rectangle.Fill>
+                    </Rectangle>
+                    <StackPanel VerticalAlignment="Bottom" Margin="10,0,10,9">
+                        <TextBlock Text="{Binding Name}" Foreground="#FFFFFFFF" FontSize="13" FontWeight="SemiBold"
+                                   TextAlignment="Center" TextTrimming="CharacterEllipsis"/>
+                        <TextBlock Text="{Binding Subtitle}" Foreground="#CCFFFFFF" FontSize="10.5"
+                                   TextAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,2,0,0"/>
+                    </StackPanel>
+                    <Rectangle RadiusX="10" RadiusY="10" Stroke="{DynamicResource CardStrokeColorDefaultBrush}" StrokeThickness="1" IsHitTestVisible="False"/>
+                </Grid>
+            </Border>
         </DataTemplate>
     </Window.Resources>
 
@@ -293,20 +405,49 @@
             <Grid x:Name="PlaylistPage" Visibility="Collapsed" Margin="16,10,16,0">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
-                <Grid Grid.Row="0" Margin="0,0,0,4">
-                    <TextBlock Text="播放列表" FontSize="14" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorPrimaryBrush}" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="8,0,0,0"/>
+
+                <!-- Header -->
+                <Grid Grid.Row="0" Margin="0,0,0,10">
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="8,0,0,0">
+                        <Border Width="3" Height="15" CornerRadius="2" Margin="0,0,8,0"
+                                Background="{DynamicResource AccentFillColorDefaultBrush}"/>
+                        <TextBlock Text="播放列表" FontSize="14" FontWeight="SemiBold"
+                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}" VerticalAlignment="Center"/>
+                    </StackPanel>
                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                         <ui:Button x:Name="SortButton" Style="{StaticResource IconBtn}" Click="Sort_Click" ToolTip="排序">
-                            <TextBlock Text="&#xE74A;" FontFamily="{StaticResource IconFont}" FontSize="15"/>
+                            <TextBlock Text="&#xE8CB;" FontFamily="{StaticResource IconFont}" FontSize="15"/>
                         </ui:Button>
                         <ui:Button x:Name="ClearButton" Style="{StaticResource IconBtn}" Click="Clear_Click" ToolTip="清空队列">
                             <TextBlock Text="&#xE74D;" FontFamily="{StaticResource IconFont}" FontSize="15"/>
                         </ui:Button>
                     </StackPanel>
                 </Grid>
-                <ListBox x:Name="SongList" Grid.Row="1" ItemTemplate="{StaticResource SongTemplate}" Margin="0,4,0,150"
+
+                <!-- Column header -->
+                <Grid Grid.Row="1" Margin="0,0,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="{StaticResource ColIndex}"/>
+                        <ColumnDefinition Width="{StaticResource ColFav}"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="{StaticResource ColQuality}"/>
+                        <ColumnDefinition Width="{StaticResource ColFormat}"/>
+                        <ColumnDefinition Width="{StaticResource ColDuration}"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="#" Foreground="{DynamicResource TextFillColorTertiaryBrush}" FontSize="10.5" VerticalAlignment="Center" HorizontalAlignment="Right" Margin="0,0,10,0"/>
+                    <TextBlock Grid.Column="1" Text="&#xEB51;" FontFamily="{StaticResource IconFont}" Foreground="{DynamicResource TextFillColorTertiaryBrush}" FontSize="11" VerticalAlignment="Center" HorizontalAlignment="Center"/>
+                    <TextBlock Grid.Column="2" Text="歌曲" Foreground="{DynamicResource TextFillColorTertiaryBrush}" FontSize="10.5" VerticalAlignment="Center" Margin="6,0,12,0"/>
+                    <TextBlock Grid.Column="3" Text="音质" Foreground="{DynamicResource TextFillColorTertiaryBrush}" FontSize="10.5" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                    <TextBlock Grid.Column="4" Text="格式" Foreground="{DynamicResource TextFillColorTertiaryBrush}" FontSize="10.5" VerticalAlignment="Center" HorizontalAlignment="Center"/>
+                    <TextBlock Grid.Column="5" Text="时长" Foreground="{DynamicResource TextFillColorTertiaryBrush}" FontSize="10.5" VerticalAlignment="Center" HorizontalAlignment="Right" Margin="0,0,14,0"/>
+                </Grid>
+                <Border Grid.Row="2" Height="1" Margin="0,6,0,0" Background="{DynamicResource CardStrokeColorDefaultBrush}"/>
+
+                <ListBox x:Name="SongList" Grid.Row="3" ItemTemplate="{StaticResource PlaylistSongTemplate}" Margin="0,2,0,150"
                          Background="Transparent" BorderThickness="0"
                          MouseDoubleClick="SongList_DoubleClick" PreviewMouseRightButtonDown="SongList_MouseRightButtonDown"/>
             </Grid>
@@ -374,7 +515,7 @@
         </Grid>
 
         <!-- ===================== Library overlay ===================== -->
-        <Grid x:Name="LibraryOverlay" Grid.Row="1" Background="{DynamicResource ApplicationBackgroundBrush}" Visibility="Collapsed">
+        <Grid x:Name="LibraryOverlay" Grid.Row="1" Background="{DynamicResource PageOverlayBrush}" Visibility="Collapsed">
             <Grid.RowDefinitions>
                 <RowDefinition Height="56"/>
                 <RowDefinition Height="Auto"/>
@@ -409,12 +550,12 @@
         </Grid>
 
         <!-- ===================== Settings overlay ===================== -->
-        <Grid x:Name="SettingsOverlay" Grid.Row="1" Background="{DynamicResource ApplicationBackgroundBrush}" Visibility="Collapsed">
+        <Grid x:Name="SettingsOverlay" Grid.Row="1" Background="{DynamicResource PageOverlayBrush}" Visibility="Collapsed">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="200"/>
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
-            <Border Grid.Column="0" Background="{DynamicResource SolidBackgroundFillColorSecondaryBrush}" BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}" BorderThickness="0,0,1,0">
+            <Border Grid.Column="0" Background="{DynamicResource PagePanelBrush}" BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}" BorderThickness="0,0,1,0">
                 <StackPanel Margin="12,18">
                     <TextBlock Text="设置" FontSize="17" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorPrimaryBrush}" Margin="12,0,0,14"/>
                     <ui:Button x:Name="SetNavLibrary" Content="音乐库" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Appearance="Primary" Margin="0,0,0,2" Click="SettingsNav_Click" Tag="library"/>

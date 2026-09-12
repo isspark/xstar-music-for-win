@@ -341,14 +341,22 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 
     private void PageToggle_Click(object sender, RoutedEventArgs e)
     {
-        _page = _page == "playlist" ? null : "playlist";
+        var open = _page != "playlist";
+        if (open) CloseOverlays();
+        _page = open ? "playlist" : null;
+        Stage.Visibility = Visibility.Visible;
         ApplyPage();
+        SyncTitleBarBackdrop();
     }
 
     private void Lyrics_Click(object sender, RoutedEventArgs e)
     {
-        _page = _page == "lyrics" ? null : "lyrics";
+        var open = _page != "lyrics";
+        if (open) CloseOverlays();
+        _page = open ? "lyrics" : null;
+        Stage.Visibility = Visibility.Visible;
         ApplyPage();
+        SyncTitleBarBackdrop();
     }
 
     private void ApplyPage()
@@ -584,6 +592,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         CdSubText.Text = song.Artist;
         var artwork = ArtworkLoader.LoadForSong(song);
         QualityText.Text = song.Quality;
+        ApplyQualityVisual(song.Quality);
         var spec = BuildMetaText(song);
         SpecChip.Visibility = string.IsNullOrWhiteSpace(spec) ? Visibility.Collapsed : Visibility.Visible;
         SpecText.Text = spec ?? "";
@@ -824,7 +833,14 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
             WindowFrame.CornerRadius = new CornerRadius(FrameCornerRadius);
         }
 
-        if (cd) { _page = null; ApplyPage(); }
+        if (cd)
+        {
+            _page = null;
+            ApplyPage();
+            CloseOverlays();
+            Stage.Visibility = Visibility.Visible;
+            SyncTitleBarBackdrop();
+        }
 
         ApplyCdWindow(cd);
         ApplyCdChrome(cd);
@@ -1197,18 +1213,66 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 
     private void Sort_Click(object sender, RoutedEventArgs e)
     {
-        _sortMode = (_sortMode + 1) % 3;
-        var ordered = _sortMode switch
+        var menu = new ContextMenu { PlacementTarget = SortButton, Placement = PlacementMode.Bottom };
+        AddSortItem(menu, 0, "默认顺序");
+        AddSortItem(menu, 1, "歌曲名称");
+        AddSortItem(menu, 2, "歌手");
+        AddSortItem(menu, 3, "专辑");
+        AddSortItem(menu, 4, "音质");
+        AddSortItem(menu, 5, "时长");
+        menu.IsOpen = true;
+        e.Handled = true;
+    }
+
+    private void AddSortItem(ContextMenu menu, int mode, string label)
+    {
+        var item = new MenuItem { Header = label, IsCheckable = true, IsChecked = _sortMode == mode };
+        item.Click += (_, _) => ApplySort(mode);
+        menu.Items.Add(item);
+    }
+
+    private void ApplySort(int mode)
+    {
+        if (mode == _sortMode) return;
+        var current = _currentIndex >= 0 && _currentIndex < _songs.Count ? _songs[_currentIndex] : null;
+        var ordered = (mode switch
         {
-            1 => _songs.OrderBy(x => x.Title, StringComparer.CurrentCulture).ToList(),
-            2 => _songs.OrderBy(x => x.Artist, StringComparer.CurrentCulture).ToList(),
-            _ => _songs.OrderBy(x => x.DisplayIndex, StringComparer.Ordinal).ToList()
-        };
+            1 => _songs.OrderBy(x => x.Title, StringComparer.CurrentCulture),
+            2 => _songs.OrderBy(x => x.Artist, StringComparer.CurrentCulture),
+            3 => _songs.OrderBy(x => x.Song.Album, StringComparer.CurrentCulture),
+            4 => _songs.OrderByDescending(x => QualityRank(x.Song.Quality)).ThenBy(x => x.Title, StringComparer.CurrentCulture),
+            5 => _songs.OrderBy(x => x.Song.DurationMs <= 0 ? long.MaxValue : x.Song.DurationMs),
+            _ => _songs.OrderBy(x => x.Index)
+        }).ToList();
+        _sortMode = mode;
         _songs.Clear();
         foreach (var row in ordered) _songs.Add(row);
-        _currentIndex = _currentIndex >= 0 && _currentIndex < _songs.Count ? _currentIndex : -1;
+        _currentIndex = current is null ? -1 : _songs.IndexOf(current);
         RenderQueue();
-        Toast(_sortMode switch { 1 => "按标题排序", 2 => "按艺术家排序", _ => "默认顺序" });
+    }
+
+    private static int QualityRank(string quality) => quality switch
+    {
+        "Hi-Res" => 5,
+        "无损" => 4,
+        "高清" => 3,
+        "在线·可下载" => 2,
+        "普通" => 1,
+        _ => 0
+    };
+
+    private void ApplyQualityVisual(string quality)
+    {
+        var (bg, fg) = quality switch
+        {
+            "高清" => ("QualityHighBgBrush", "QualityHighFgBrush"),
+            "无损" => ("QualityLosslessBgBrush", "QualityLosslessFgBrush"),
+            "Hi-Res" => ("QualityHiresBgBrush", "QualityHiresFgBrush"),
+            "在线·可下载" or "在线·试听" => ("QualityOnlineBgBrush", "QualityOnlineFgBrush"),
+            _ => ("QualityNormalBgBrush", "QualityNormalFgBrush")
+        };
+        QualityChip.Background = (Brush)FindResource(bg);
+        QualityText.Foreground = (Brush)FindResource(fg);
     }
 
     /* ===================== volume / progress ===================== */
@@ -1500,24 +1564,37 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 
     private void Library_Click(object sender, RoutedEventArgs e)
     {
-        SettingsOverlay.Visibility = Visibility.Collapsed;
-        LibraryOverlay.Visibility = Visibility.Visible;
-        SyncTitleBarBackdrop();
+        ShowOverlay(library: true);
         RenderLibrary();
     }
 
     private void Settings_Click(object sender, RoutedEventArgs e)
     {
-        LibraryOverlay.Visibility = Visibility.Collapsed;
-        SettingsOverlay.Visibility = Visibility.Visible;
-        SyncTitleBarBackdrop();
+        ShowOverlay(library: false);
         BuildSettings(_settingsSection);
+    }
+
+    /// <summary>Opens one top-level overlay and closes every other panel (page + overlays).</summary>
+    private void ShowOverlay(bool library)
+    {
+        _page = null;
+        ApplyPage();
+        LibraryOverlay.Visibility = library ? Visibility.Visible : Visibility.Collapsed;
+        SettingsOverlay.Visibility = library ? Visibility.Collapsed : Visibility.Visible;
+        Stage.Visibility = Visibility.Collapsed;
+        SyncTitleBarBackdrop();
+    }
+
+    private void CloseOverlays()
+    {
+        LibraryOverlay.Visibility = Visibility.Collapsed;
+        SettingsOverlay.Visibility = Visibility.Collapsed;
     }
 
     private void CloseOverlays_Click(object sender, RoutedEventArgs e)
     {
-        LibraryOverlay.Visibility = Visibility.Collapsed;
-        SettingsOverlay.Visibility = Visibility.Collapsed;
+        CloseOverlays();
+        Stage.Visibility = Visibility.Visible;
         SyncTitleBarBackdrop();
     }
 
@@ -2145,8 +2222,9 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 
     public sealed class SongRow
     {
-        public SongRow(Song song, int index) { Song = song; DisplayIndex = index.ToString("00"); }
+        public SongRow(Song song, int index) { Song = song; Index = index; DisplayIndex = index.ToString("00"); }
         public Song Song { get; }
+        public int Index { get; }
         public string DisplayIndex { get; }
         public string Title => Song.Title;
         public string Artist => Song.Artist;
