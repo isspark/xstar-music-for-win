@@ -1,0 +1,29 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- Dark theme — semantic surfaces / text / borders -->
+    <SolidColorBrush x:Key="BgCanvasBrush" Color="#0B0C10"/>
+    <SolidColorBrush x:Key="SurfaceBrush" Color="#14161D"/>
+    <SolidColorBrush x:Key="SurfaceAltBrush" Color="#1B1E27"/>
+    <SolidColorBrush x:Key="SunkenBrush" Color="#0E1016"/>
+    <SolidColorBrush x:Key="ControlBrush" Color="#1B1E27"/>
+
+    <SolidColorBrush x:Key="BorderBrush" Color="#14FFFFFF"/>
+    <SolidColorBrush x:Key="BorderStrongBrush" Color="#333A4A"/>
+
+    <SolidColorBrush x:Key="HoverBrush" Color="#14FFFFFF"/>
+    <SolidColorBrush x:Key="PressedBrush" Color="#24FFFFFF"/>
+
+    <SolidColorBrush x:Key="TextPrimaryBrush" Color="#F4F6FA"/>
+    <SolidColorBrush x:Key="TextSecondaryBrush" Color="#A6ADBD"/>
+    <SolidColorBrush x:Key="TextMutedBrush" Color="#6E7686"/>
+
+    <SolidColorBrush x:Key="TrackBrush" Color="#232838"/>
+    <SolidColorBrush x:Key="DangerBrush" Color="#F87171"/>
+    <SolidColorBrush x:Key="ScrimBrush" Color="#A6000000"/>
+
+    <!-- cover overlay text (always light-on-artwork) -->
+    <SolidColorBrush x:Key="OnArtworkBrush" Color="#FFFFFF"/>
+    <SolidColorBrush x:Key="OnArtworkSoftBrush" Color="#EBFFFFFF"/>
+    <SolidColorBrush x:Key="OnArtworkChipBrush" Color="#66000000"/>
+</ResourceDictionary>

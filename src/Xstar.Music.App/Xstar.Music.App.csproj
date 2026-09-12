@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <Platforms>AnyCPU</Platforms>
+    <ApplicationIcon>Assets\app.ico</ApplicationIcon>
+  </PropertyGroup>
+  <ItemGroup>
+    <Resource Include="Assets\app.ico" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Xstar.Music.Core\Xstar.Music.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Hardcodet.NotifyIcon.Wpf" Version="2.0.1" />
+    <PackageReference Include="ManagedBass" Version="4.0.2" />
+    <PackageReference Include="System.Text.Encoding.CodePages" Version="8.0.0" />
+    <PackageReference Include="WPF-UI" Version="4.3.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="native\win-x64\bass.dll" CopyToOutputDirectory="PreserveNewest" Link="bass.dll" />
+    <None Include="native\win-x64\bassflac.dll" CopyToOutputDirectory="PreserveNewest" Link="bassflac.dll" />
+    <None Include="native\win-x64\bassopus.dll" CopyToOutputDirectory="PreserveNewest" Link="bassopus.dll" />
+    <None Include="native\win-x64\bassalac.dll" CopyToOutputDirectory="PreserveNewest" Link="bassalac.dll" />
+    <None Include="native\win-x64\bassape.dll" CopyToOutputDirectory="PreserveNewest" Link="bassape.dll" />
+    <None Include="native\win-x64\BASS-LICENSE.txt" CopyToOutputDirectory="PreserveNewest" Link="BASS-LICENSE.txt" />
+  </ItemGroup>
+</Project>

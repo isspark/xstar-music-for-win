@@ -360,3 +360,35 @@ ScanEngine：
 ## 17. 文档同步约定
 
 `docs/requirements.md`、`docs/tech-design.md` 与 `docs/ui-prototype.html` 应随开发同步维护；新增功能需同步更新需求、设计落点、数据迁移、测试场景与风险。
+
+## 18. 当前实现状态
+
+当前仓库已完成第二轮功能实现，并已通过编译、单元测试与启动验证：
+
+- 已创建 `Xstar.Music.sln`、`Xstar.Music.App`、`Xstar.Music.Core` 与 `Xstar.Music.Tests`。
+- 已实现单窗口深色界面、顶部专辑背景、歌曲标题/歌手/音质展示、播放控制、进度条、音量弹层。
+- 已实现歌曲信息弹层、播放列表与歌词面板、浏览方式（歌曲/专辑/艺术家/我的收藏/最近播放/播放列表）与歌词样式菜单。
+- 已实现多目录配置的 JSON 持久化、递归扫描、支持格式过滤和 SQLite 歌曲索引。
+- 播放后端已接入 **BASS/BASS.NET**：`BassPlayerEngine` 实现 `IPlayerEngine`，原生 `bass.dll` 与 FLAC/Opus/ALAC/APE 插件位于 `src/Xstar.Music.App/native/win-x64` 并随构建复制到输出目录；初始化失败时自动回退到 `MediaPlayerEngine`（WPF `MediaPlayer`）。UC 端仍仅依赖接口。
+- 已实现收藏、播放历史、自定义播放列表（`favorites` / `play_history` / `playlists` / `playlist_items` 表，`PRAGMA user_version = 3`）。
+- 已实现本地同名 LRC 解析、逐行高亮、字号/淡化样式持久化，以及 **LRCLIB 在线歌词**获取与本地缓存（`%APPDATA%\XstarMusic\lyrics`）。
+- 已实现基于 **Jamendo**（Creative Commons 免费音乐）的在线搜索与下载，需在设置中填写免费 `client_id`；下载目录可配置。
+- 已实现全局媒体键（播放/暂停、上一首、下一首、停止）与系统托盘（显示、控制、退出），关闭窗口时最小化到托盘。
+- 已验证：`dotnet build .\Xstar.Music.sln` 为 0 警告 0 错误，`dotnet test .\Xstar.Music.sln` 17/17 通过，应用可正常启动并初始化 BASS 2.4。
+- 剩余：BASS 10 段 EQ、无缝/淡入淡出播放、在线音源多源聚合与音乐视频等 P2 能力；EQ 依赖 BASS_FX 插件。
+
+## 19. 第三方依赖与许可
+
+- **BASS / BASS.NET**：BASS 原生库（`bass.dll` 及插件）由 Un4seen Developments 提供，非商业用途免费；许可证文本见 `src/Xstar.Music.App/native/win-x64/BASS-LICENSE.txt`。商业化前需评估授权或切换 `IPlayerEngine` 到 libVLC 等替代实现。
+- **ManagedBass**（NuGet）：MIT 许可的托管绑定。
+- **TagLib#**、**Microsoft.Data.Sqlite**：各自开源许可。
+- **Jamendo API**：需自行申请 `client_id`，使用须遵守其服务条款。
+- **LRCLIB**：公开歌词接口，用于在线歌词获取。
+
+验证命令：
+
+```powershell
+dotnet build .\Xstar.Music.sln
+dotnet test  .\Xstar.Music.sln
+dotnet run   --project .\src\Xstar.Music.App\Xstar.Music.App.csproj
+```

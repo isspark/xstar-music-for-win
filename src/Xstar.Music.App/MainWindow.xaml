@@ -1,0 +1,385 @@
+<ui:FluentWindow x:Class="Xstar.Music.App.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+        xmlns:local="clr-namespace:Xstar.Music.App"
+        Title="XSTAR" Width="900" Height="620" MinWidth="680" MinHeight="500"
+        Icon="pack://application:,,,/Assets/app.ico"
+        WindowStartupLocation="CenterScreen"
+        WindowStyle="None" AllowsTransparency="True" ResizeMode="CanResize"
+        Background="Transparent"
+        WindowCornerPreference="Round"
+        FontFamily="{StaticResource AppFont}"
+        UseLayoutRounding="True" SnapsToDevicePixels="True"
+        KeyDown="Window_KeyDown">
+
+    <Window.Resources>
+        <local:PathToImageConverter x:Key="PathToImage"/>
+
+        <GridLength x:Key="ColIndex">34</GridLength>
+        <GridLength x:Key="ColFav">30</GridLength>
+        <GridLength x:Key="ColFormat">60</GridLength>
+        <GridLength x:Key="ColDuration">56</GridLength>
+
+        <!-- icon-only ui:Button (sized to match the window caption buttons) -->
+        <Style x:Key="IconBtn" TargetType="{x:Type ui:Button}" BasedOn="{StaticResource {x:Type ui:Button}}">
+            <Setter Property="Width" Value="44"/>
+            <Setter Property="Height" Value="30"/>
+            <Setter Property="Padding" Value="0"/>
+            <Setter Property="CornerRadius" Value="6"/>
+            <Setter Property="Appearance" Value="Transparent"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="FontSize" Value="14"/>
+        </Style>
+
+        <Style x:Key="TransportUi" TargetType="{x:Type ui:Button}" BasedOn="{StaticResource {x:Type ui:Button}}">
+            <Setter Property="Width" Value="44"/>
+            <Setter Property="Height" Value="44"/>
+            <Setter Property="Padding" Value="0"/>
+            <Setter Property="CornerRadius" Value="22"/>
+            <Setter Property="Appearance" Value="Transparent"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="FontSize" Value="18"/>
+        </Style>
+
+        <!-- ===== Song row ===== -->
+        <DataTemplate x:Key="SongTemplate">
+            <Grid Height="50">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="{StaticResource ColIndex}"/>
+                    <ColumnDefinition Width="{StaticResource ColFav}"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="{StaticResource ColFormat}"/>
+                    <ColumnDefinition Width="{StaticResource ColDuration}"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" Text="{Binding DisplayIndex}" Foreground="{DynamicResource TextFillColorTertiaryBrush}" FontSize="11.5" VerticalAlignment="Center" HorizontalAlignment="Right" Margin="0,0,10,0"/>
+                <TextBlock Grid.Column="1" Text="{Binding FavoriteGlyph}" FontFamily="{StaticResource IconFont}" FontSize="13" VerticalAlignment="Center" HorizontalAlignment="Center">
+                    <TextBlock.Style>
+                        <Style TargetType="TextBlock">
+                            <Setter Property="Foreground" Value="{DynamicResource TextFillColorTertiaryBrush}"/>
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsFavorite}" Value="True">
+                                    <Setter Property="Foreground" Value="{StaticResource FavoriteBrush}"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </TextBlock.Style>
+                </TextBlock>
+                <StackPanel Grid.Column="2" VerticalAlignment="Center" Margin="6,0,12,0">
+                    <TextBlock Text="{Binding Title}" Foreground="{DynamicResource TextFillColorPrimaryBrush}" FontSize="13" TextTrimming="CharacterEllipsis"/>
+                    <TextBlock Text="{Binding Artist}" Foreground="{DynamicResource TextFillColorTertiaryBrush}" FontSize="11" TextTrimming="CharacterEllipsis" Margin="0,1,0,0"/>
+                </StackPanel>
+                <Border Grid.Column="3" Background="{DynamicResource ControlFillColorDefaultBrush}" CornerRadius="4" Padding="9,2" Margin="0,0,10,0" VerticalAlignment="Center">
+                    <TextBlock Text="{Binding Song.Quality}" Foreground="{DynamicResource TextFillColorSecondaryBrush}" FontSize="10"/>
+                </Border>
+                <TextBlock Grid.Column="4" Text="{Binding Format}" Foreground="{DynamicResource TextFillColorSecondaryBrush}" FontSize="10.5" VerticalAlignment="Center" HorizontalAlignment="Center"/>
+                <TextBlock Grid.Column="5" Text="{Binding DurationText}" Foreground="{DynamicResource TextFillColorTertiaryBrush}" FontSize="11" VerticalAlignment="Center" HorizontalAlignment="Right" Margin="0,0,14,0"/>
+            </Grid>
+        </DataTemplate>
+
+        <!-- ===== Album / artist card ===== -->
+        <DataTemplate x:Key="AlbumCardTemplate">
+            <ui:CardControl Margin="0,0,14,14" Width="152" Padding="12" Cursor="Hand">
+                <StackPanel>
+                    <Border CornerRadius="8" Height="126" Background="{DynamicResource ControlFillColorSecondaryBrush}" ClipToBounds="True">
+                        <Image Source="{Binding ArtworkPath, Converter={StaticResource PathToImage}}" Stretch="UniformToFill"/>
+                    </Border>
+                    <TextBlock Text="{Binding Name}" Foreground="{DynamicResource TextFillColorPrimaryBrush}" FontSize="12.5" FontWeight="SemiBold" Margin="0,10,0,0" TextTrimming="CharacterEllipsis"/>
+                    <TextBlock Text="{Binding Subtitle}" Foreground="{DynamicResource TextFillColorTertiaryBrush}" FontSize="11" Margin="0,2,0,0" TextTrimming="CharacterEllipsis"/>
+                </StackPanel>
+            </ui:CardControl>
+        </DataTemplate>
+    </Window.Resources>
+
+    <!-- Whole-window frame: fills the window and clips content to rounded corners. -->
+    <Border x:Name="WindowFrame" CornerRadius="10" ClipToBounds="True"
+            Background="{DynamicResource ApplicationBackgroundBrush}"
+            BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}" BorderThickness="1"
+            SnapsToDevicePixels="True">
+        <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <!-- Ambient background spans title bar + stage so both share the same colour -->
+        <Border x:Name="NpBackground" Grid.RowSpan="2" Width="900" Height="900" CornerRadius="450" Opacity="0.5" IsHitTestVisible="False" HorizontalAlignment="Center" VerticalAlignment="Center">
+            <Border.Effect><BlurEffect Radius="90" KernelType="Gaussian"/></Border.Effect>
+        </Border>
+
+        <!-- ===================== Fluent title bar ===================== -->
+        <ui:TitleBar x:Name="TitleBarControl" Grid.Row="0" Title="XSTAR" Height="32" Background="Transparent"
+                     Icon="{ui:ImageIcon 'pack://application:,,,/Assets/app.ico'}"
+                     ShowMinimize="True" ShowMaximize="True" ShowClose="True">
+            <ui:TitleBar.TrailingContent>
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,6,0">
+                    <ui:Button x:Name="PlaylistButton" Style="{StaticResource IconBtn}" Click="PageToggle_Click" ToolTip="播放列表">
+                        <TextBlock Text="&#xE8FD;" FontFamily="{StaticResource IconFont}" FontSize="14"/>
+                    </ui:Button>
+                    <ui:Button x:Name="LyricsButton" Style="{StaticResource IconBtn}" Click="Lyrics_Click" ToolTip="歌词">
+                        <TextBlock Text="&#xE8D2;" FontFamily="{StaticResource IconFont}" FontSize="14"/>
+                    </ui:Button>
+                    <ui:Button x:Name="LibraryButton" Style="{StaticResource IconBtn}" Click="Library_Click" ToolTip="音乐库">
+                        <TextBlock Text="&#xE8A9;" FontFamily="{StaticResource IconFont}" FontSize="14"/>
+                    </ui:Button>
+                    <ui:Button x:Name="SettingsButton" Style="{StaticResource IconBtn}" Click="Settings_Click" ToolTip="设置">
+                        <TextBlock Text="&#xE713;" FontFamily="{StaticResource IconFont}" FontSize="14"/>
+                    </ui:Button>
+                </StackPanel>
+            </ui:TitleBar.TrailingContent>
+        </ui:TitleBar>
+
+        <!-- ===================== Stage ===================== -->
+        <Grid x:Name="Stage" Grid.Row="1" ClipToBounds="True" SizeChanged="Stage_SizeChanged">
+
+            <!-- Album / now playing view (default) -->
+            <Grid x:Name="AlbumView">
+                <!-- Rotating vinyl disc (behind the centred song info) -->
+                <Grid x:Name="NowPlayingDisc" Width="340" Height="340" HorizontalAlignment="Center" VerticalAlignment="Center"
+                      Margin="0,0,0,72" RenderTransformOrigin="0.5,0.5">
+                    <Grid.RenderTransform>
+                        <TransformGroup>
+                            <ScaleTransform x:Name="DiscScale" ScaleX="1.2" ScaleY="1.2"/>
+                            <RotateTransform x:Name="DiscRotate" Angle="0"/>
+                        </TransformGroup>
+                    </Grid.RenderTransform>
+
+                    <Ellipse Width="340" Height="340">
+                        <Ellipse.Fill>
+                            <RadialGradientBrush GradientOrigin="0.34,0.30" Center="0.42,0.42" RadiusX="0.82" RadiusY="0.82">
+                                <GradientStop Color="#16181E" Offset="0"/>
+                                <GradientStop Color="#05060A" Offset="0.62"/>
+                                <GradientStop Color="#010203" Offset="1"/>
+                            </RadialGradientBrush>
+                        </Ellipse.Fill>
+                        <Ellipse.Effect>
+                            <DropShadowEffect BlurRadius="44" ShadowDepth="10" Direction="270" Opacity="0.55" Color="#000000"/>
+                        </Ellipse.Effect>
+                    </Ellipse>
+
+                    <!-- artwork face (shown when the song has a cover / artist image) -->
+                    <Ellipse x:Name="DiscArtwork" Width="340" Height="340" Visibility="Collapsed" IsHitTestVisible="False">
+                        <Ellipse.Fill>
+                            <ImageBrush x:Name="DiscArtworkBrush" Stretch="UniformToFill"/>
+                        </Ellipse.Fill>
+                    </Ellipse>
+
+                    <!-- grooves (generated in code for density/realism) -->
+                    <Image x:Name="DiscGrooves" Width="340" Height="340" Stretch="Fill" IsHitTestVisible="False"/>
+
+                    <!-- sheen -->
+                    <Ellipse Width="340" Height="340">
+                        <Ellipse.Fill>
+                            <LinearGradientBrush StartPoint="0.1,0" EndPoint="0.9,1">
+                                <GradientStop Color="#1AFFFFFF" Offset="0"/>
+                                <GradientStop Color="#00FFFFFF" Offset="0.45"/>
+                                <GradientStop Color="#0AFFFFFF" Offset="1"/>
+                            </LinearGradientBrush>
+                        </Ellipse.Fill>
+                    </Ellipse>
+
+                    <!-- scrim to keep the centred text legible over artwork -->
+                    <Ellipse x:Name="DiscScrim" Width="340" Height="340" Visibility="Collapsed" IsHitTestVisible="False">
+                        <Ellipse.Fill>
+                            <RadialGradientBrush GradientOrigin="0.5,0.5" Center="0.5,0.5" RadiusX="0.58" RadiusY="0.58">
+                                <GradientStop Color="#73000000" Offset="0"/>
+                                <GradientStop Color="#00000000" Offset="1"/>
+                            </RadialGradientBrush>
+                        </Ellipse.Fill>
+                    </Ellipse>
+
+                    <!-- centre label -->
+                    <Ellipse x:Name="DiscLabel" Width="140" Height="140">
+                        <Ellipse.Fill>
+                            <ImageBrush x:Name="DiscLabelBrush" Stretch="UniformToFill"/>
+                        </Ellipse.Fill>
+                    </Ellipse>
+                    <Image x:Name="DiscLabelTexture" Width="140" Height="140" Stretch="Fill" IsHitTestVisible="False"/>
+                    <Ellipse x:Name="DiscLabelRing" Width="140" Height="140" Stroke="#33FFFFFF" StrokeThickness="1"/>
+
+                    <!-- spindle hole -->
+                    <Ellipse Width="22" Height="22" Fill="#0A0B0E"/>
+                    <Ellipse Width="22" Height="22" Stroke="#59FFFFFF" StrokeThickness="1"/>
+                </Grid>
+
+                <StackPanel x:Name="NowPlayingInfo" VerticalAlignment="Center" HorizontalAlignment="Center"
+                            MaxWidth="620" Margin="24,0,24,72">
+                    <TextBlock x:Name="TitleText" Text="还没有歌曲" FontSize="32" FontWeight="Bold"
+                               TextAlignment="Center" TextTrimming="CharacterEllipsis"
+                               Foreground="{DynamicResource TextFillColorPrimaryBrush}">
+                        <TextBlock.Effect>
+                            <DropShadowEffect BlurRadius="16" ShadowDepth="0" Opacity="0.6" Color="#000000"/>
+                        </TextBlock.Effect>
+                    </TextBlock>
+                    <TextBlock x:Name="SubText" Text="在设置中添加音乐文件夹" FontSize="15"
+                               TextAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,8,0,0"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}">
+                        <TextBlock.Effect>
+                            <DropShadowEffect BlurRadius="10" ShadowDepth="0" Opacity="0.5" Color="#000000"/>
+                        </TextBlock.Effect>
+                    </TextBlock>
+                    <StackPanel x:Name="InfoChips" Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,18,0,0">
+                        <Border x:Name="QualityChip" Background="{DynamicResource ControlFillColorDefaultBrush}" CornerRadius="4" Padding="10,4" Margin="0,0,8,0" VerticalAlignment="Center">
+                            <TextBlock x:Name="QualityText" Text="普通" Foreground="{DynamicResource TextFillColorSecondaryBrush}" FontSize="11"/>
+                        </Border>
+                        <Border x:Name="SpecChip" Background="{DynamicResource ControlFillColorDefaultBrush}" CornerRadius="4" Padding="10,4" Margin="0,0,0,0" VerticalAlignment="Center">
+                            <TextBlock x:Name="SpecText" Text="" Foreground="{DynamicResource TextFillColorSecondaryBrush}" FontSize="11"/>
+                        </Border>
+                    </StackPanel>
+                </StackPanel>
+            </Grid>
+
+            <!-- Playlist page -->
+            <Grid x:Name="PlaylistPage" Visibility="Collapsed" Margin="16,10,16,0">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                <Grid Grid.Row="0" Margin="0,0,0,4">
+                    <TextBlock Text="播放列表" FontSize="14" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorPrimaryBrush}" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="8,0,0,0"/>
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                        <ui:Button x:Name="SortButton" Style="{StaticResource IconBtn}" Click="Sort_Click" ToolTip="排序">
+                            <TextBlock Text="&#xE74A;" FontFamily="{StaticResource IconFont}" FontSize="15"/>
+                        </ui:Button>
+                        <ui:Button x:Name="ClearButton" Style="{StaticResource IconBtn}" Click="Clear_Click" ToolTip="清空队列">
+                            <TextBlock Text="&#xE74D;" FontFamily="{StaticResource IconFont}" FontSize="15"/>
+                        </ui:Button>
+                    </StackPanel>
+                </Grid>
+                <ListBox x:Name="SongList" Grid.Row="1" ItemTemplate="{StaticResource SongTemplate}" Margin="0,4,0,150"
+                         Background="Transparent" BorderThickness="0"
+                         MouseDoubleClick="SongList_DoubleClick" PreviewMouseRightButtonDown="SongList_MouseRightButtonDown"/>
+            </Grid>
+
+            <!-- Lyrics page -->
+            <Grid x:Name="LyricsPage" Visibility="Collapsed" Margin="16,10,16,0">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                <Grid Grid.Row="0" Margin="0,0,0,6">
+                    <TextBlock x:Name="LyricsHead" Text="歌词" FontSize="14" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorPrimaryBrush}" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="8,0,0,0"/>
+                    <ui:Button x:Name="FetchLyricsButton" Content="获取歌词（LRCLIB）" Appearance="Secondary" HorizontalAlignment="Right" Click="FetchLyrics_Click"/>
+                </Grid>
+                <ScrollViewer x:Name="LyricsView" Grid.Row="1" VerticalScrollBarVisibility="Auto" Padding="0,6,0,150">
+                    <StackPanel x:Name="LyricsPanel" HorizontalAlignment="Center" Margin="0,0,0,20"/>
+                </ScrollViewer>
+            </Grid>
+
+            <!-- Floating transparent playback bar -->
+            <StackPanel x:Name="PlaybackBar" VerticalAlignment="Bottom" HorizontalAlignment="Center" Margin="0,0,0,22" Width="680">
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                    <ui:Button x:Name="ModeButton" Style="{StaticResource TransportUi}" Click="Mode_Click" ToolTip="播放模式">
+                        <TextBlock x:Name="ModeGlyphText" Text="&#xE8EE;" FontFamily="{StaticResource IconFont}" FontSize="18"/>
+                    </ui:Button>
+                    <ui:Button x:Name="PreviousButton" Style="{StaticResource TransportUi}" Click="Previous_Click" ToolTip="上一首">
+                        <TextBlock Text="&#xE892;" FontFamily="{StaticResource IconFont}" FontSize="18"/>
+                    </ui:Button>
+                    <Grid Width="76" Height="76" Margin="6,0" VerticalAlignment="Center">
+                        <Ellipse x:Name="PlayGlow" Width="72" Height="72" IsHitTestVisible="False" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        <ui:Button x:Name="PlayButton" Style="{StaticResource TransportUi}" Width="58" Height="58" CornerRadius="29"
+                                   Appearance="Primary" Click="Play_Click" ToolTip="播放 / 暂停"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center">
+                            <TextBlock x:Name="PlayGlyphText" Text="&#xE768;" FontFamily="{StaticResource IconFont}" FontSize="22"/>
+                        </ui:Button>
+                    </Grid>
+                    <ui:Button x:Name="NextButton" Style="{StaticResource TransportUi}" Click="Next_Click" ToolTip="下一首">
+                        <TextBlock Text="&#xE893;" FontFamily="{StaticResource IconFont}" FontSize="18"/>
+                    </ui:Button>
+                    <Grid Width="44" Height="44">
+                        <ui:Button x:Name="VolumeButton" Style="{StaticResource TransportUi}" Click="Volume_Click" ToolTip="音量">
+                            <TextBlock Text="&#xE767;" FontFamily="{StaticResource IconFont}" FontSize="18"/>
+                        </ui:Button>
+                        <Popup x:Name="VolumePopup" PlacementTarget="{Binding ElementName=VolumeButton}" Placement="Top" StaysOpen="False" AllowsTransparency="True">
+                            <Border Background="{DynamicResource SolidBackgroundFillColorSecondaryBrush}" BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="14,10" Margin="0,0,0,8">
+                                <StackPanel Orientation="Horizontal">
+                                    <Slider x:Name="VolumeSlider" Width="130" Minimum="0" Maximum="1" Value="0.72" ValueChanged="Volume_ValueChanged"/>
+                                    <TextBlock x:Name="VolumeText" Text="72%" Foreground="{DynamicResource TextFillColorPrimaryBrush}" FontSize="11.5" Margin="10,0,0,0" VerticalAlignment="Center" Width="34"/>
+                                </StackPanel>
+                            </Border>
+                        </Popup>
+                    </Grid>
+                </StackPanel>
+                <Grid Margin="0,10,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="48"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="48"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock x:Name="CurrentTime" Grid.Column="0" Text="00:00" Foreground="{DynamicResource TextFillColorSecondaryBrush}" FontSize="11" VerticalAlignment="Center"/>
+                    <Slider x:Name="ProgressSlider" Grid.Column="1" Minimum="0" Maximum="1" ValueChanged="Progress_ValueChanged"/>
+                    <TextBlock x:Name="TotalTime" Grid.Column="2" Text="00:00" Foreground="{DynamicResource TextFillColorSecondaryBrush}" FontSize="11" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                </Grid>
+            </StackPanel>
+        </Grid>
+
+        <!-- ===================== Library overlay ===================== -->
+        <Grid x:Name="LibraryOverlay" Grid.Row="1" Background="{DynamicResource ApplicationBackgroundBrush}" Visibility="Collapsed">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="56"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+            <Grid Grid.Row="0" Margin="20,0">
+                <TextBlock Text="音乐库" FontSize="17" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorPrimaryBrush}" VerticalAlignment="Center"/>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+                    <ui:TextBox x:Name="SearchBox" Width="240" PlaceholderText="搜索" Margin="0,0,8,0" TextChanged="Search_TextChanged"/>
+                    <ToggleButton x:Name="OnlineButton" Content="在线" Padding="12,6" Margin="0,0,8,0" Click="Online_Click"/>
+                    <ui:Button x:Name="LibraryCloseButton" Content="关闭" Appearance="Secondary" Click="CloseOverlays_Click"/>
+                </StackPanel>
+            </Grid>
+            <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="14,0">
+                <ToggleButton x:Name="LibTabSongs" Content="歌曲" IsChecked="True" Click="LibraryTab_Click" Tag="songs" Margin="0,0,4,0"/>
+                <ToggleButton x:Name="LibTabAlbums" Content="专辑" Click="LibraryTab_Click" Tag="albums" Margin="0,0,4,0"/>
+                <ToggleButton x:Name="LibTabArtists" Content="艺术家" Click="LibraryTab_Click" Tag="artists" Margin="0,0,4,0"/>
+                <ToggleButton x:Name="LibTabFavorites" Content="收藏" Click="LibraryTab_Click" Tag="favorites" Margin="0,0,4,0"/>
+                <ToggleButton x:Name="LibTabRecent" Content="最近" Click="LibraryTab_Click" Tag="recent" Margin="0,0,4,0"/>
+                <ToggleButton x:Name="LibTabPlaylists" Content="歌单" Click="LibraryTab_Click" Tag="playlists"/>
+            </StackPanel>
+            <Grid Grid.Row="2" Margin="16,8,16,20">
+                <ListBox x:Name="LibraryList" ItemTemplate="{StaticResource SongTemplate}" Background="Transparent" BorderThickness="0" MouseDoubleClick="SongList_DoubleClick"/>
+                <ScrollViewer x:Name="LibraryGridScroll" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                    <ItemsControl x:Name="LibraryGrid" ItemTemplate="{StaticResource AlbumCardTemplate}" MouseDoubleClick="LibraryGrid_DoubleClick">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate><WrapPanel Orientation="Horizontal"/></ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                    </ItemsControl>
+                </ScrollViewer>
+            </Grid>
+        </Grid>
+
+        <!-- ===================== Settings overlay ===================== -->
+        <Grid x:Name="SettingsOverlay" Grid.Row="1" Background="{DynamicResource ApplicationBackgroundBrush}" Visibility="Collapsed">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="200"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <Border Grid.Column="0" Background="{DynamicResource SolidBackgroundFillColorSecondaryBrush}" BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}" BorderThickness="0,0,1,0">
+                <StackPanel Margin="12,18">
+                    <TextBlock Text="设置" FontSize="17" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorPrimaryBrush}" Margin="12,0,0,14"/>
+                    <ui:Button x:Name="SetNavLibrary" Content="音乐库" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Appearance="Primary" Margin="0,0,0,2" Click="SettingsNav_Click" Tag="library"/>
+                    <ui:Button x:Name="SetNavAppearance" Content="外观" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Appearance="Transparent" Margin="0,0,0,2" Click="SettingsNav_Click" Tag="appearance"/>
+                    <ui:Button x:Name="SetNavPlayback" Content="播放" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Appearance="Transparent" Margin="0,0,0,2" Click="SettingsNav_Click" Tag="playback"/>
+                    <ui:Button x:Name="SetNavLyrics" Content="歌词" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Appearance="Transparent" Margin="0,0,0,2" Click="SettingsNav_Click" Tag="lyrics"/>
+                    <ui:Button x:Name="SetNavOnline" Content="在线" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Appearance="Transparent" Margin="0,0,0,2" Click="SettingsNav_Click" Tag="online"/>
+                    <ui:Button x:Name="SetNavAbout" Content="关于" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Appearance="Transparent" Click="SettingsNav_Click" Tag="about"/>
+                </StackPanel>
+            </Border>
+            <Grid Grid.Column="1">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="56"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                <Grid Grid.Row="0" Margin="22,0">
+                    <TextBlock x:Name="SettingsTitle" Text="音乐库" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorPrimaryBrush}" VerticalAlignment="Center"/>
+                    <ui:Button x:Name="SettingsCloseButton" Content="关闭" Appearance="Secondary" HorizontalAlignment="Right" VerticalAlignment="Center" Click="CloseOverlays_Click"/>
+                </Grid>
+                <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Padding="22,4,22,24">
+                    <StackPanel x:Name="SettingsBody"/>
+                </ScrollViewer>
+            </Grid>
+        </Grid>
+    </Grid>
+    </Border>
+</ui:FluentWindow>
