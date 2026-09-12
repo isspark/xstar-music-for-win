@@ -42,6 +42,18 @@
             <Setter Property="FontSize" Value="18"/>
         </Style>
 
+        <!-- CD mode: invisible third-zones over the disc (prev / play-pause / next) -->
+        <Style x:Key="DiscZone" TargetType="{x:Type Border}">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="CornerRadius" Value="10"/>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#14FFFFFF"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
         <!-- ===== Song row ===== -->
         <DataTemplate x:Key="SongTemplate">
             <Grid Height="50">
@@ -126,12 +138,18 @@
                     <ui:Button x:Name="SettingsButton" Style="{StaticResource IconBtn}" Click="Settings_Click" ToolTip="设置">
                         <TextBlock Text="&#xE713;" FontFamily="{StaticResource IconFont}" FontSize="14"/>
                     </ui:Button>
+                    <ui:Button x:Name="ViewModeButton" Style="{StaticResource IconBtn}" Click="ViewMode_Click" ToolTip="CD 唱片模式">
+                        <TextBlock Text="&#xE958;" FontFamily="{StaticResource IconFont}" FontSize="14"/>
+                    </ui:Button>
                 </StackPanel>
             </ui:TitleBar.TrailingContent>
         </ui:TitleBar>
 
         <!-- ===================== Stage ===================== -->
-        <Grid x:Name="Stage" Grid.Row="1" ClipToBounds="True" SizeChanged="Stage_SizeChanged">
+        <Grid x:Name="Stage" Grid.Row="1" ClipToBounds="True" SizeChanged="Stage_SizeChanged"
+              PreviewMouseLeftButtonDown="Stage_PreviewMouseLeftButtonDown"
+              PreviewMouseMove="Stage_PreviewMouseMove"
+              PreviewMouseLeftButtonUp="Stage_PreviewMouseLeftButtonUp">
 
             <!-- Album / now playing view (default) -->
             <Grid x:Name="AlbumView">
@@ -145,7 +163,7 @@
                         </TransformGroup>
                     </Grid.RenderTransform>
 
-                    <Ellipse Width="340" Height="340">
+                    <Ellipse x:Name="DiscBase" Width="340" Height="340">
                         <Ellipse.Fill>
                             <RadialGradientBrush GradientOrigin="0.34,0.30" Center="0.42,0.42" RadiusX="0.82" RadiusY="0.82">
                                 <GradientStop Color="#16181E" Offset="0"/>
@@ -228,6 +246,25 @@
                         </Border>
                     </StackPanel>
                 </StackPanel>
+
+                <!-- CD record mode: clickable left / centre / right regions over the disc -->
+                <Grid x:Name="DiscClickZones" HorizontalAlignment="Center" VerticalAlignment="Center"
+                      Width="408" Height="408" Visibility="Collapsed">
+                    <Grid.ContextMenu>
+                        <ContextMenu>
+                            <MenuItem Header="设置" Click="CdSettings_Click"/>
+                            <MenuItem Header="退出 CD 唱片模式" Click="ExitCdMode_Click"/>
+                        </ContextMenu>
+                    </Grid.ContextMenu>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <Border Grid.Column="0" Style="{StaticResource DiscZone}" ToolTip="上一首" MouseLeftButtonUp="DiscPrev_Click"/>
+                    <Border Grid.Column="1" Style="{StaticResource DiscZone}" ToolTip="播放 / 暂停" MouseLeftButtonUp="DiscPlay_Click"/>
+                    <Border Grid.Column="2" Style="{StaticResource DiscZone}" ToolTip="下一首" MouseLeftButtonUp="DiscNext_Click"/>
+                </Grid>
             </Grid>
 
             <!-- Playlist page -->

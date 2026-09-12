@@ -47,6 +47,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
     private double _lyricsFontSize = 14;
     private bool _dimLyrics = true;
     private bool _discRotation = true;
+    private string _displayMode = "normal";
     private double _discSize = 1.2;
     private double _discSpeed = 26;
     private double _windowOpacity = 1.0;
@@ -79,6 +80,13 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 
     [DllImport("user32.dll")] private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
     [DllImport("user32.dll")] private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+    [DllImport("dwmapi.dll")] private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
+    private const int DwmwaWindowCornerPreference = 33;
+    private const int DwmwaBorderColor = 34;
+    private const int DwmcpDoNotRound = 1;
+    private const int DwmcpRound = 2;
+    private const int DwmwaColorDefault = unchecked((int)0xFFFFFFFF);
+    private const int DwmwaColorNone = unchecked((int)0xFFFFFFFE);
     [DllImport("user32.dll", EntryPoint = "GetWindowLongW")] private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
     [DllImport("user32.dll", EntryPoint = "SetWindowLongW")] private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
     private const int GwlExStyle = -20;
@@ -116,6 +124,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         DiscGrooves.Source = BuildGrooveImage(340);
         DiscLabelTexture.Source = BuildLabelTextureImage(140);
         UpdateDiscRotation();
+        ApplyDisplayMode();
         StateChanged += (_, _) => UpdateFrameClip();
         WindowFrame.SizeChanged += (_, _) => UpdateFrameClip();
         UpdateFrameClip();
@@ -268,7 +277,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 
     private void UpdateFrameClip()
     {
-        var radius = WindowState == WindowState.Maximized ? 0 : FrameCornerRadius;
+        var radius = WindowState == WindowState.Maximized || string.Equals(_displayMode, "cd", StringComparison.OrdinalIgnoreCase) ? 0 : FrameCornerRadius;
         WindowFrame.Clip = new RectangleGeometry(
             new Rect(0, 0, WindowFrame.ActualWidth, WindowFrame.ActualHeight), radius, radius);
     }
@@ -363,6 +372,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
                 _lyricsFontSize = state?.LyricsFontSize is > 0 ? state.LyricsFontSize : 14;
                 _dimLyrics = state?.DimLyrics ?? true;
                 _discRotation = state?.DiscRotation ?? true;
+                _displayMode = state?.DisplayMode ?? "normal";
                 _discSize = state?.DiscSize is > 0 ? state.DiscSize : 1.2;
                 _discSpeed = state?.DiscSpeed is > 0 ? state.DiscSpeed : 26;
                 _windowOpacity = state?.WindowOpacity is >= 0 and <= 1 ? state.WindowOpacity : 1.0;
@@ -384,6 +394,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
             if (_folders.Count > 0) await ScanAsync();
             else RenderQueue();
             UpdateDiscRotation();
+            ApplyDisplayMode();
         }
         catch { /* 首次启动或损坏配置不阻断应用 */ }
     }
@@ -403,6 +414,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
                 LyricsFontSize = _lyricsFontSize,
                 DimLyrics = _dimLyrics,
                 DiscRotation = _discRotation,
+                DisplayMode = _displayMode,
                 DiscSize = _discSize,
                 DiscSpeed = _discSpeed,
                 WindowOpacity = _windowOpacity,
@@ -713,11 +725,29 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
     private void UpdateDiscRotation()
     {
         if (NowPlayingDisc is null) return;
-        var show = _currentIndex >= 0;
+        var cd = string.Equals(_displayMode, "cd", StringComparison.OrdinalIgnoreCase);
+        var show = _currentIndex >= 0 || cd;
         NowPlayingDisc.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
 
-        DiscScale.ScaleX = _discSize;
-        DiscScale.ScaleY = _discSize;
+        var scale = _discSize;
+        if (cd)
+        {
+            var side = Math.Min(Stage.ActualWidth, Stage.ActualHeight);
+            if (side > 40) scale = side / 340.0;
+        }
+
+        DiscScale.ScaleX = scale;
+        DiscScale.ScaleY = scale;
+
+        if (DiscClickZones is not null)
+        {
+            DiscClickZones.Width = 340 * scale;
+            DiscClickZones.Height = 340 * scale;
+            DiscClickZones.Visibility = show && cd
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+        }
+
         if (!show) return;
 
         if (_discClock is null || Math.Abs(_discClockSpeed - _discSpeed) > 0.01)
@@ -741,6 +771,171 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         NowPlayingInfo.RenderTransform = new TranslateTransform(0, 10);
         NowPlayingInfo.BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(320)) { EasingFunction = ease });
         ((TranslateTransform)NowPlayingInfo.RenderTransform).BeginAnimation(TranslateTransform.YProperty, new DoubleAnimation(10, 0, TimeSpan.FromMilliseconds(320)) { EasingFunction = ease });
+    }
+
+    /* ===================== display mode ===================== */
+
+    private void ApplyDisplayMode()
+    {
+        var cd = string.Equals(_displayMode, "cd", StringComparison.OrdinalIgnoreCase);
+
+        TitleBarControl.Opacity = cd ? 0 : 1;
+        TitleBarControl.IsHitTestVisible = !cd;
+        TitleBarControl.Height = cd ? 0 : 32;
+        NpBackground.Visibility = cd ? Visibility.Collapsed : Visibility.Visible;
+        PlaybackBar.Visibility = cd ? Visibility.Collapsed : Visibility.Visible;
+        InfoChips.Visibility = cd ? Visibility.Collapsed : Visibility.Visible;
+        PlaylistButton.Visibility = cd ? Visibility.Collapsed : Visibility.Visible;
+        LyricsButton.Visibility = cd ? Visibility.Collapsed : Visibility.Visible;
+        LibraryButton.Visibility = cd ? Visibility.Collapsed : Visibility.Visible;
+        NowPlayingDisc.Margin = cd ? new Thickness(0) : new Thickness(0, 0, 0, 72);
+        NowPlayingInfo.Margin = cd ? new Thickness(24) : new Thickness(24, 0, 24, 72);
+        DiscBase.Effect = cd ? null : _discShadow;
+
+        if (cd)
+        {
+            WindowFrame.Background = Brushes.Transparent;
+            WindowFrame.BorderBrush = null;
+            WindowFrame.BorderThickness = new Thickness(0);
+            WindowFrame.CornerRadius = new CornerRadius(0);
+            EnsureTransparentWindowBackground();
+        }
+        else
+        {
+            WindowFrame.SetResourceReference(Border.BackgroundProperty, "ApplicationBackgroundBrush");
+            WindowFrame.SetResourceReference(Border.BorderBrushProperty, "CardStrokeColorDefaultBrush");
+            WindowFrame.BorderThickness = new Thickness(1);
+            WindowFrame.CornerRadius = new CornerRadius(FrameCornerRadius);
+        }
+
+        if (cd) { _page = null; ApplyPage(); }
+
+        ApplyCdWindow(cd);
+        ApplyCdChrome(cd);
+        UpdateFrameClip();
+        UpdateDiscRotation();
+    }
+
+    /// <summary>Removes the OS window frame (Windows 11 border + rounded corners) so no edge is drawn.</summary>
+    private void ApplyCdChrome(bool cd)
+    {
+        BorderThickness = new Thickness(0);
+        BorderBrush = Brushes.Transparent;
+
+        var handle = new WindowInteropHelper(this).Handle;
+        if (handle == IntPtr.Zero) return;
+        try
+        {
+            var corner = cd ? DwmcpDoNotRound : DwmcpRound;
+            DwmSetWindowAttribute(handle, DwmwaWindowCornerPreference, ref corner, sizeof(int));
+            var border = cd ? DwmwaColorNone : DwmwaColorDefault;
+            DwmSetWindowAttribute(handle, DwmwaBorderColor, ref border, sizeof(int));
+        }
+        catch { /* 老版本系统不支持该属性 */ }
+    }
+
+    private readonly DropShadowEffect _discShadow = new()
+    {
+        BlurRadius = 44,
+        ShadowDepth = 10,
+        Direction = 270,
+        Opacity = 0.55,
+        Color = Colors.Black
+    };
+
+    private Size? _preCdSize;
+    private double _preCdMinWidth = 680;
+    private double _preCdMinHeight = 500;
+
+    private void ApplyCdWindow(bool cd)
+    {
+        if (cd)
+        {
+            if (_preCdSize is null)
+            {
+                _preCdSize = new Size(Width, Height);
+                _preCdMinWidth = MinWidth;
+                _preCdMinHeight = MinHeight;
+            }
+            MinWidth = 320;
+            MinHeight = 320;
+            var side = Math.Max(360, Math.Round(Math.Min(_preCdSize.Value.Width, _preCdSize.Value.Height) * 2.0 / 3.0));
+            Width = side;
+            Height = side;
+        }
+        else if (_preCdSize is not null)
+        {
+            MinWidth = _preCdMinWidth;
+            MinHeight = _preCdMinHeight;
+            Width = _preCdSize.Value.Width;
+            Height = _preCdSize.Value.Height;
+            _preCdSize = null;
+        }
+    }
+
+    /* ===================== cd mode window drag ===================== */
+
+    private Point _stageDragStart;
+    private bool _stageDragArmed;
+    private bool _suppressDiscClick;
+
+    private void Stage_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        _stageDragArmed = string.Equals(_displayMode, "cd", StringComparison.OrdinalIgnoreCase);
+        _suppressDiscClick = false;
+        _stageDragStart = e.GetPosition(this);
+    }
+
+    private void Stage_PreviewMouseMove(object sender, MouseEventArgs e)
+    {
+        if (!_stageDragArmed || e.LeftButton != MouseButtonState.Pressed) return;
+        var position = e.GetPosition(this);
+        if (Math.Abs(position.X - _stageDragStart.X) < SystemParameters.MinimumHorizontalDragDistance &&
+            Math.Abs(position.Y - _stageDragStart.Y) < SystemParameters.MinimumVerticalDragDistance) return;
+
+        _stageDragArmed = false;
+        _suppressDiscClick = true;
+        try { DragMove(); } catch { /* 非左键拖动时忽略 */ }
+    }
+
+    private void Stage_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e) => _stageDragArmed = false;
+
+    private void DiscPrev_Click(object sender, MouseButtonEventArgs e)
+    {
+        if (_suppressDiscClick) { _suppressDiscClick = false; return; }
+        Previous_Click(sender, e);
+    }
+
+    private void DiscPlay_Click(object sender, MouseButtonEventArgs e)
+    {
+        if (_suppressDiscClick) { _suppressDiscClick = false; return; }
+        Play_Click(sender, e);
+    }
+
+    private void DiscNext_Click(object sender, MouseButtonEventArgs e)
+    {
+        if (_suppressDiscClick) { _suppressDiscClick = false; return; }
+        Next_Click(sender, e);
+    }
+
+    private void CdSettings_Click(object sender, RoutedEventArgs e)
+    {
+        _settingsSection = "appearance";
+        Settings_Click(sender, e);
+    }
+
+    private void ViewMode_Click(object sender, RoutedEventArgs e)
+    {
+        _displayMode = string.Equals(_displayMode, "cd", StringComparison.OrdinalIgnoreCase) ? "normal" : "cd";
+        ApplyDisplayMode();
+        SaveSettings();
+    }
+
+    private void ExitCdMode_Click(object sender, RoutedEventArgs e)
+    {
+        _displayMode = "normal";
+        ApplyDisplayMode();
+        SaveSettings();
     }
 
     private void Play_Click(object sender, RoutedEventArgs e)
@@ -1444,6 +1639,15 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         motion.Children.Add(Field("精简动效", "减少过渡与动画", Switch(_reduceMotion, value => { _reduceMotion = value; SaveSettings(); UpdateDiscRotation(); })));
         SettingsBody.Children.Add(Card("动效", motion));
 
+        var display = new StackPanel();
+        display.Children.Add(Field("界面模式", "普通保留完整控制；CD 唱片仅显示旋转唱片，按左 / 中 / 右分区切歌", Segment(new[] { "普通", "CD 唱片" }, _displayMode == "cd" ? 1 : 0, index =>
+        {
+            _displayMode = index == 1 ? "cd" : "normal";
+            ApplyDisplayMode();
+            SaveSettings();
+        })));
+        SettingsBody.Children.Add(Card("播放界面", display));
+
         var disc = new StackPanel();
         disc.Children.Add(Field("唱片旋转", "播放时缓慢旋转光碟", Switch(_discRotation, value => { _discRotation = value; SaveSettings(); UpdateDiscRotation(); })));
         disc.Children.Add(SliderRow("光碟大小", "播放页中央光碟的显示比例", 0.8, 1.5, 0.05, _discSize,
@@ -1638,6 +1842,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         NpBackground.Width = glow;
         NpBackground.Height = glow;
         PlaybackBar.Width = Math.Max(320, Math.Min(680, width - 40));
+        UpdateDiscRotation();
     }
 
     /* ===================== watchers ===================== */
@@ -1718,6 +1923,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         public double LyricsFontSize { get; set; } = 14;
         public bool DimLyrics { get; set; } = true;
         public bool DiscRotation { get; set; } = true;
+        public string DisplayMode { get; set; } = "normal";
         public double DiscSize { get; set; } = 1.2;
         public double DiscSpeed { get; set; } = 26;
         public double WindowOpacity { get; set; } = 1.0;
