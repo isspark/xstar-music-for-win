@@ -269,7 +269,8 @@
                 </Grid>
 
                 <!-- CD record mode: lyrics shown above the disc -->
-                <Grid x:Name="CdLyricsOverlay" Visibility="Collapsed" Background="Transparent" ContextMenu="{StaticResource CdMenu}">
+                <Grid x:Name="CdLyricsOverlay" Visibility="Collapsed" Background="Transparent"
+                      ContextMenu="{StaticResource CdMenu}" PreviewMouseLeftButtonUp="CdLyrics_Click">
                     <DockPanel Margin="20,22,20,18">
                         <StackPanel DockPanel.Dock="Top" Margin="0,0,0,10">
                             <TextBlock x:Name="CdTitleText" Text="还没有歌曲" FontSize="20" FontWeight="Bold"
@@ -281,7 +282,7 @@
                                        TextTrimming="CharacterEllipsis" Margin="0,4,0,0"
                                        Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
                         </StackPanel>
-                        <ScrollViewer x:Name="CdLyricsView" VerticalScrollBarVisibility="Auto" Background="Transparent" Padding="0,4,0,20">
+                        <ScrollViewer x:Name="CdLyricsView" VerticalScrollBarVisibility="Hidden" Background="Transparent" Padding="0,4,0,20">
                             <StackPanel x:Name="CdLyricsPanel" HorizontalAlignment="Center"/>
                         </ScrollViewer>
                     </DockPanel>

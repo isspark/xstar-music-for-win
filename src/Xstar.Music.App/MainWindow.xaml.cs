@@ -47,6 +47,10 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
     private readonly List<TextBlock> _cdLyricBlocks = new();
     private bool _cdLyrics;
     private double _lyricsFontSize = 14;
+    private string _lyricFontFamily = "";
+    private Color? _lyricActiveColor;
+    private Color? _lyricInactiveColor;
+    private int _lastLyricIndex = -1;
     private bool _dimLyrics = true;
     private bool _discRotation = true;
     private string _displayMode = "normal";
@@ -374,6 +378,9 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
                 _lyricsFontSize = state?.LyricsFontSize is > 0 ? state.LyricsFontSize : 14;
                 _dimLyrics = state?.DimLyrics ?? true;
                 _cdLyrics = state?.CdLyrics ?? false;
+                _lyricFontFamily = state?.LyricFontFamily ?? "";
+                _lyricActiveColor = ParseColor(state?.LyricActiveColor);
+                _lyricInactiveColor = ParseColor(state?.LyricInactiveColor);
                 _discRotation = state?.DiscRotation ?? true;
                 _displayMode = state?.DisplayMode ?? "normal";
                 _discSize = state?.DiscSize is > 0 ? state.DiscSize : 1.2;
@@ -417,6 +424,9 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
                 LyricsFontSize = _lyricsFontSize,
                 DimLyrics = _dimLyrics,
                 CdLyrics = _cdLyrics,
+                LyricFontFamily = _lyricFontFamily,
+                LyricActiveColor = _lyricActiveColor is { } ac ? $"#{ac.A:X2}{ac.R:X2}{ac.G:X2}{ac.B:X2}" : null,
+                LyricInactiveColor = _lyricInactiveColor is { } ic ? $"#{ic.A:X2}{ic.R:X2}{ic.G:X2}{ic.B:X2}" : null,
                 DiscRotation = _discRotation,
                 DisplayMode = _displayMode,
                 DiscSize = _discSize,
@@ -935,6 +945,18 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         Next_Click(sender, e);
     }
 
+    /// <summary>While lyrics are shown the disc is behind them, so route clicks by region here too.</summary>
+    private void CdLyrics_Click(object sender, MouseButtonEventArgs e)
+    {
+        if (_suppressDiscClick) { _suppressDiscClick = false; return; }
+        var width = CdLyricsOverlay.ActualWidth;
+        if (width <= 0) return;
+        var x = e.GetPosition(CdLyricsOverlay).X;
+        if (x < width / 3) Previous_Click(sender, e);
+        else if (x > width * 2 / 3) Next_Click(sender, e);
+        else Play_Click(sender, e);
+    }
+
     private void CdSettings_Click(object sender, RoutedEventArgs e)
     {
         _settingsSection = "appearance";
@@ -1280,6 +1302,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         CdLyricsPanel.Children.Clear();
         _lyricBlocks.Clear();
         _cdLyricBlocks.Clear();
+        _lastLyricIndex = -1;
     }
 
     private void BuildLyricBlocks()
@@ -1293,10 +1316,14 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 
     private TextBlock CreateLyricBlock(LyricLine line, Panel host)
     {
+        var family = string.IsNullOrWhiteSpace(_lyricFontFamily)
+            ? (Application.Current?.TryFindResource("AppFont") as FontFamily ?? SystemFonts.MessageFontFamily)
+            : new FontFamily(_lyricFontFamily);
         var block = new TextBlock
         {
             Text = line.Text,
             Foreground = ResBrush("TextMutedBrush"),
+            FontFamily = family,
             FontSize = _lyricsFontSize,
             Margin = new Thickness(8, 2, 8, 2),
             MaxWidth = 760,
@@ -1331,18 +1358,50 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         var current = 0;
         var position = _player.Snapshot.Position.TotalMilliseconds;
         for (var i = 0; i < _lyricLines.Count; i++) if (_lyricLines[i].TimeMs <= position) current = i;
-        var accent = ResBrush("AccentBrush");
-        var muted = ResBrush("TextMutedBrush");
+        var activeBrush = _lyricActiveColor is { } activeColor ? new SolidColorBrush(activeColor) : ResBrush("AccentBrush");
+        var inactiveBrush = _lyricInactiveColor is { } inactiveColor ? new SolidColorBrush(inactiveColor) : ResBrush("TextMutedBrush");
         for (var i = 0; i < _lyricBlocks.Count; i++)
         {
             var active = i == current;
-            StyleLyricBlock(_lyricBlocks[i], active, accent, muted);
-            if (i < _cdLyricBlocks.Count) StyleLyricBlock(_cdLyricBlocks[i], active, accent, muted);
+            StyleLyricBlock(_lyricBlocks[i], active, activeBrush, inactiveBrush);
+            if (i < _cdLyricBlocks.Count) StyleLyricBlock(_cdLyricBlocks[i], active, activeBrush, inactiveBrush);
         }
-        if (current < _lyricBlocks.Count && LyricsPage.Visibility == Visibility.Visible && _player.Snapshot.IsPlaying)
-            _lyricBlocks[current].BringIntoView();
-        if (current < _cdLyricBlocks.Count && CdLyricsOverlay.Visibility == Visibility.Visible && _player.Snapshot.IsPlaying)
-            _cdLyricBlocks[current].BringIntoView();
+
+        var changed = force || current != _lastLyricIndex;
+        _lastLyricIndex = current;
+        if (!changed) return;
+        if (current < _lyricBlocks.Count && LyricsPage.Visibility == Visibility.Visible)
+            CenterActiveLyric(LyricsView, _lyricBlocks[current]);
+        if (current < _cdLyricBlocks.Count && CdLyricsOverlay.Visibility == Visibility.Visible)
+            CenterActiveLyric(CdLyricsView, _cdLyricBlocks[current]);
+    }
+
+    /// <summary>Scrolls the lyric view so the active line is vertically centred.</summary>
+    private void CenterActiveLyric(ScrollViewer view, TextBlock block)
+    {
+        if (view is null || block is null) return;
+        if (view.ViewportHeight <= 0 || block.ActualHeight <= 0)
+        {
+            Dispatcher.BeginInvoke(new Action(() => CenterActiveLyric(view, block)), DispatcherPriority.Loaded);
+            return;
+        }
+        // Half-viewport padding above and below lets the first/last line sit at the centre too.
+        if (block.Parent is FrameworkElement panel)
+        {
+            var margin = new Thickness(0, view.ViewportHeight / 2, 0, view.ViewportHeight / 2);
+            if (!Equals(panel.Margin, margin))
+            {
+                panel.Margin = margin;
+                view.UpdateLayout();
+            }
+        }
+        try
+        {
+            var point = block.TransformToAncestor(view).Transform(new Point(0, 0));
+            var target = view.VerticalOffset + point.Y - Math.Max(0, (view.ViewportHeight - block.ActualHeight) / 2);
+            view.ScrollToVerticalOffset(Math.Max(0, target));
+        }
+        catch { try { block.BringIntoView(); } catch { } }
     }
 
     private void StyleLyricBlock(TextBlock block, bool active, Brush accent, Brush muted)
@@ -1533,6 +1592,13 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 
     private Brush ResBrush(string key)
         => TryFindResource(FluentBrushAlias.TryGetValue(key, out var fluent) ? fluent : key) as Brush ?? Brushes.Transparent;
+
+    private static Color? ParseColor(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        try { return (Color)ColorConverter.ConvertFromString(text); }
+        catch { return null; }
+    }
 
     private static Border Card(string title, UIElement content)
     {
@@ -1832,12 +1898,100 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         panel.Children.Add(Field("在线歌词", "本地缺失时从 LRCLIB 获取并缓存", Switch(true, _ => { })));
         var sizes = new[] { 12d, 14d, 17d, 20d };
         var index = Array.IndexOf(sizes, _lyricsFontSize);
-        panel.Children.Add(Field("歌词字号", "歌词页面", Segment(new[] { "小", "标准", "大", "特大" }, index < 0 ? 1 : index, i => { _lyricsFontSize = sizes[i]; RenderLyrics(); SaveSettings(); })));
+        panel.Children.Add(Field("歌词字号", "歌词页面与 CD 歌词", Segment(new[] { "小", "标准", "大", "特大" }, index < 0 ? 1 : index, i => { _lyricsFontSize = sizes[i]; RenderLyrics(); SaveSettings(); })));
+        panel.Children.Add(FontFamilyField("歌词字体", "默认使用应用字体", _lyricFontFamily, value => { _lyricFontFamily = value; RenderLyrics(); SaveSettings(); }));
+
+        var activeColor = _lyricActiveColor ?? (ResBrush("AccentBrush") as SolidColorBrush)?.Color ?? Color.FromRgb(0x6E, 0x8B, 0xFF);
+        panel.Children.Add(ColorField("正在播放颜色", "当前高亮歌词行的前景色", activeColor, color => { _lyricActiveColor = color; UpdateLyricHighlight(force: true); SaveSettings(); }));
+        var inactiveColor = _lyricInactiveColor ?? (ResBrush("TextMutedBrush") as SolidColorBrush)?.Color ?? Color.FromArgb(0xB0, 0xFF, 0xFF, 0xFF);
+        panel.Children.Add(ColorField("未播放颜色", "其余歌词行的颜色", inactiveColor, color => { _lyricInactiveColor = color; UpdateLyricHighlight(force: true); SaveSettings(); }));
+
         var clear = new Button { Content = "清理", Style = (Style)FindResource("GhostButton") };
         clear.Click += (_, _) => Toast("歌词缓存已清理");
         panel.Children.Add(Field("清理歌词缓存", "删除已缓存的在线歌词", clear));
         SettingsBody.Children.Add(Card("歌词", panel));
     }
+
+    private UIElement FontFamilyField(string label, string? sub, string current, Action<string> onChange)
+    {
+        var options = new (string Label, string Value)[]
+        {
+            ("默认", ""),
+            ("微软雅黑", "Microsoft YaHei UI"),
+            ("等线", "DengXian"),
+            ("宋体", "SimSun"),
+            ("楷体", "KaiTi"),
+            ("黑体", "SimHei"),
+            ("Segoe UI Variable", "Segoe UI Variable Text"),
+        };
+        var combo = new ComboBox { Width = 190, VerticalAlignment = VerticalAlignment.Center };
+        foreach (var option in options) combo.Items.Add(new ComboBoxItem { Content = option.Label, Tag = option.Value });
+        var selected = Array.FindIndex(options, o => string.Equals(o.Value, current ?? "", StringComparison.OrdinalIgnoreCase));
+        combo.SelectedIndex = selected < 0 ? 0 : selected;
+        combo.SelectionChanged += (_, _) =>
+        {
+            if (combo.SelectedItem is ComboBoxItem item && item.Tag is string value) onChange(value);
+        };
+        return Field(label, sub, combo);
+    }
+
+    private UIElement ColorField(string label, string? sub, Color value, Action<Color> onChange)
+    {
+        var palette = new[]
+        {
+            Colors.White,
+            Color.FromRgb(0xC8, 0xC8, 0xC8),
+            Color.FromRgb(0x8A, 0x8A, 0x8A),
+            Colors.Black,
+            Color.FromRgb(0x6E, 0x8B, 0xFF),
+            Color.FromRgb(0xB1, 0x5C, 0xFF),
+            Color.FromRgb(0x2E, 0xD3, 0xB7),
+            Color.FromRgb(0x3D, 0xD6, 0x8C),
+            Color.FromRgb(0xFF, 0xD1, 0x66),
+            Color.FromRgb(0xFF, 0x7A, 0x59),
+            Color.FromRgb(0xF0, 0x6A, 0x9A)
+        };
+
+        var swatches = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 10, 0) };
+        var hexBox = new TextBox { Text = ToHex(value), Width = 100, Padding = new Thickness(8, 6, 8, 6), VerticalContentAlignment = VerticalAlignment.Center };
+        var updating = false;
+
+        foreach (var color in palette)
+        {
+            var brush = new SolidColorBrush(color);
+            var swatch = new Border
+            {
+                Width = 22,
+                Height = 22,
+                CornerRadius = new CornerRadius(11),
+                Margin = new Thickness(0, 0, 6, 0),
+                Background = brush,
+                BorderBrush = ResBrush("BorderBrush"),
+                BorderThickness = new Thickness(1),
+                Cursor = Cursors.Hand,
+                ToolTip = ToHex(color)
+            };
+            var picked = color;
+            swatch.MouseLeftButtonUp += (_, _) => { updating = true; hexBox.Text = ToHex(picked); updating = false; onChange(picked); };
+            swatches.Children.Add(swatch);
+        }
+
+        hexBox.TextChanged += (_, _) =>
+        {
+            if (updating) return;
+            if (ParseColor(hexBox.Text.Trim()) is { } parsed) onChange(parsed);
+        };
+
+        var row = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+        row.Children.Add(swatches);
+        row.Children.Add(hexBox);
+        return Field(label, sub, row);
+    }
+
+    private static string ToHex(Color color)
+        => color.A == 0xFF
+            ? $"#{color.R:X2}{color.G:X2}{color.B:X2}"
+            : $"#{color.A:X2}{color.R:X2}{color.G:X2}{color.B:X2}";
 
     private void BuildOnline()
     {
@@ -1973,6 +2127,9 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         public double LyricsFontSize { get; set; } = 14;
         public bool DimLyrics { get; set; } = true;
         public bool CdLyrics { get; set; }
+        public string LyricFontFamily { get; set; } = "";
+        public string? LyricActiveColor { get; set; }
+        public string? LyricInactiveColor { get; set; }
         public bool DiscRotation { get; set; } = true;
         public string DisplayMode { get; set; } = "normal";
         public double DiscSize { get; set; } = 1.2;
