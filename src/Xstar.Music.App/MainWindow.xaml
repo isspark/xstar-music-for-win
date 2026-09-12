@@ -260,7 +260,7 @@
                     <ui:Button x:Name="SettingsButton" Style="{StaticResource IconBtn}" Click="Settings_Click" ToolTip="设置">
                         <TextBlock Text="&#xE713;" FontFamily="{StaticResource IconFont}" FontSize="14"/>
                     </ui:Button>
-                    <ui:Button x:Name="ViewModeButton" Style="{StaticResource IconBtn}" Click="ViewMode_Click" ToolTip="CD 唱片模式">
+                    <ui:Button x:Name="ViewModeButton" Style="{StaticResource IconBtn}" Click="ViewMode_Click" ToolTip="显示模式">
                         <TextBlock Text="&#xE958;" FontFamily="{StaticResource IconFont}" FontSize="14"/>
                     </ui:Button>
                 </StackPanel>
@@ -402,6 +402,26 @@
                         </ScrollViewer>
                     </DockPanel>
                 </Grid>
+            </Grid>
+
+            <!-- Visualizer view (third display mode: audio-reactive visualization).
+                 Transparent backdrop: the theme-tinted surface comes from WindowFrame and the
+                 renderer clears its bitmap with the same themed colour every frame. -->
+            <Grid x:Name="VisualizerView" Visibility="Collapsed" Background="Transparent" ClipToBounds="True">
+                <Image x:Name="VisualizerImage" Stretch="UniformToFill" SnapsToDevicePixels="True"/>
+                <!-- Optional song info overlay -->
+                <StackPanel x:Name="VisualizerInfoOverlay" VerticalAlignment="Bottom" HorizontalAlignment="Center"
+                            Margin="0,0,0,72" Opacity="0.75">
+                    <TextBlock x:Name="VisualizerTitleText" Text="还没有歌曲" FontSize="24" FontWeight="Bold"
+                               TextAlignment="Center" Foreground="White"
+                               TextTrimming="CharacterEllipsis" MaxWidth="500">
+                        <TextBlock.Effect><DropShadowEffect BlurRadius="16" ShadowDepth="0" Opacity="0.7" Color="#000000"/></TextBlock.Effect>
+                    </TextBlock>
+                    <TextBlock x:Name="VisualizerSubText" Text="" FontSize="13"
+                               TextAlignment="Center" Foreground="#CCFFFFFF" Margin="0,4,0,0">
+                        <TextBlock.Effect><DropShadowEffect BlurRadius="10" ShadowDepth="0" Opacity="0.6" Color="#000000"/></TextBlock.Effect>
+                    </TextBlock>
+                </StackPanel>
             </Grid>
 
             <!-- Playlist page -->

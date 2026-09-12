@@ -26,4 +26,9 @@ public interface IPlayerEngine : IDisposable
     // EQ — default implementation is a no-op so MediaPlayerEngine stays compatible.
     virtual void SetEqualizerEnabled(bool enabled) { }
     virtual void SetEqualizerBand(int band, double gainDb) { }
+
+    // Visualizer data — default implementations return empty arrays so non-BASS engines
+    // degrade gracefully to a static background.
+    virtual float[] GetSpectrumData(int bands = 64) => Array.Empty<float>();
+    virtual float[] GetWaveformData(int samples = 512) => Array.Empty<float>();
 }

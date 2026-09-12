@@ -15,6 +15,7 @@ using System.Windows.Media.Effects;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Hardcodet.Wpf.TaskbarNotification;
+using Xstar.Music.App.Visualizer;
 using Xstar.Music.Core;
 
 namespace Xstar.Music.App;
@@ -84,6 +85,11 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
     private readonly List<TextBlock> _eqGainTexts = new();
     private bool _suppressEqSave;
 
+    // Visualizer state
+    private readonly VisualizerEngine _visualizerEngine;
+    private string _visualizerStyle = "stardust";
+    private bool _visualizerShowInfo = true;
+
     private readonly string _settingsPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "XstarMusic", "settings.json");
     private readonly OnlineLyricsProvider _lyricsProvider = new(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "XstarMusic", "lyrics"));
     private readonly string _dataDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "XstarMusic");
@@ -111,6 +117,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
     {
         InitializeComponent();
         SongList.ItemsSource = _songs;
+        _visualizerEngine = new VisualizerEngine(_player);
 
         _player.Opened += (_, _) => Dispatcher.Invoke(() =>
         {
@@ -141,7 +148,19 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         ApplyDisplayMode();
         StateChanged += (_, _) => UpdateFrameClip();
         WindowFrame.SizeChanged += (_, _) => UpdateFrameClip();
+        VisualizerView.SizeChanged += VisualizerView_SizeChanged;
         UpdateFrameClip();
+    }
+
+    private void VisualizerView_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (e.NewSize.Width > 10 && e.NewSize.Height > 10)
+        {
+            int w = (int)Math.Round(e.NewSize.Width);
+            int h = (int)Math.Round(e.NewSize.Height);
+            _visualizerEngine.SetBitmapSize(w, h);
+            VisualizerImage.Source = _visualizerEngine.Bitmap;
+        }
     }
 
     private void OnThemeChanged()
@@ -152,6 +171,28 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         // ApplicationThemeManager repaints the window background right after this, so re-assert
         // the fully transparent window surface (window background + composition target).
         EnsureTransparentWindowBackground();
+    }
+
+    /// <summary>
+    /// Pushes the current accent into the visualizer and, while the visualizer mode is active,
+    /// repaints the window frame with the accent-tinted backdrop. The backdrop stays dark (the
+    /// renderers need it for additive glow) but its hue follows the selected theme / cover colour.
+    /// Keeping the frame opaque in visualizer mode is also what makes the title bar strip
+    /// hit-testable again — the layered window manager skips fully transparent pixels.
+    /// </summary>
+    private void SyncVisualizerTheme()
+    {
+        var accent = ThemeManager.AccentColor;
+        var bg = RendererUtils.ThemedBackground(accent);
+        _visualizerEngine.AccentColor = accent;
+        _visualizerEngine.BackgroundColor = bg;
+
+        var brush = new SolidColorBrush(bg);
+        brush.Freeze();
+        _vizSurfaceBrush = brush;
+
+        if (string.Equals(_displayMode, "visualizer", StringComparison.OrdinalIgnoreCase))
+            WindowFrame.Background = brush;
     }
 
     private void OnClosing(object? sender, CancelEventArgs e)
@@ -165,6 +206,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         }
         ThemeManager.Changed -= OnThemeChanged;
         foreach (var watcher in _watchers.Values) watcher.Dispose();
+        _visualizerEngine.Dispose();
         if (_source is not null)
         {
             foreach (var key in MediaKeys) UnregisterHotKey(_source.Handle, key.Id);
@@ -423,6 +465,8 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
                 var gains = state?.EqGains;
                 if (gains is not null && gains.Count == _eqGains.Length)
                     for (var i = 0; i < _eqGains.Length; i++) _eqGains[i] = gains[i];
+                _visualizerStyle = state?.VisualizerStyle ?? "stardust";
+                _visualizerShowInfo = state?.VisualizerShowInfo ?? true;
             }
             ThemeManager.ApplyPreset(ThemeManager.GetPreset(_themePreset));
             ThemeManager.SetMode(ParseTheme(_themeName));
@@ -434,6 +478,8 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
             if (_folders.Count > 0) await ScanAsync();
             else RenderQueue();
             UpdateDiscRotation();
+            SyncVisualizerTheme();
+            _visualizerEngine.SetStyle(_visualizerStyle);
             ApplyDisplayMode();
             ApplyEqToEngine();
         }
@@ -470,7 +516,9 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
                 JamendoClientId = _jamendoClientId,
                 DownloadFolder = _downloadFolder,
                 EqEnabled = _eqEnabled,
-                EqGains = _eqGains.ToList()
+                EqGains = _eqGains.ToList(),
+                VisualizerStyle = _visualizerStyle,
+                VisualizerShowInfo = _visualizerShowInfo
             }));
         }
         catch { }
@@ -729,6 +777,10 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         AnimateNowPlaying();
         _timer.Start();
         UpdateDiscRotation();
+
+        // Sync visualizer info overlay
+        VisualizerTitleText.Text = song.Title;
+        VisualizerSubText.Text = string.IsNullOrWhiteSpace(song.Album) ? song.Artist : $"{song.Artist} · {song.Album}";
     }
 
     private void UpdateNowPlayingGradient()
@@ -749,6 +801,9 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         glow.GradientStops.Add(new GradientStop(Color.FromArgb(0x99, accent.R, accent.G, accent.B), 0));
         glow.GradientStops.Add(new GradientStop(Color.FromArgb(0x00, accent.R, accent.G, accent.B), 1));
         PlayGlow.Fill = glow;
+
+        // Keep the visualizer accent/backdrop in sync with cover- or preset-derived colours.
+        SyncVisualizerTheme();
     }
 
     private static ImageSource BuildGrooveImage(double diameter)
@@ -909,27 +964,76 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 
     /* ===================== display mode ===================== */
 
+    /// <summary>Opaque window surface used behind the visualizer (theme-tinted, refreshed by <see cref="SyncVisualizerTheme"/>).</summary>
+    private Brush _vizSurfaceBrush = Brushes.Black;
+
+    /// <summary>Light caption foreground forced while the (always-dark) visualizer is shown.</summary>
+    private static readonly Brush VizTitleBarForeground = new SolidColorBrush(Color.FromArgb(235, 233, 236, 242));
+
+    private void ApplyVisualizerTitleBarChrome(bool viz)
+    {
+        if (viz)
+        {
+            // The visualizer backdrop is always dark — keep caption text/buttons light
+            // even while a light theme preset is active.
+            TitleBarControl.Foreground = VizTitleBarForeground;
+            TitleBarControl.ButtonsForeground = VizTitleBarForeground;
+            SettingsButton.Foreground = VizTitleBarForeground;
+            ViewModeButton.Foreground = VizTitleBarForeground;
+        }
+        else
+        {
+            TitleBarControl.ClearValue(Control.ForegroundProperty);
+            TitleBarControl.ClearValue(Wpf.Ui.Controls.TitleBar.ButtonsForegroundProperty);
+            SettingsButton.ClearValue(Control.ForegroundProperty);
+            ViewModeButton.ClearValue(Control.ForegroundProperty);
+        }
+    }
+
     private void ApplyDisplayMode()
     {
         var cd = string.Equals(_displayMode, "cd", StringComparison.OrdinalIgnoreCase);
+        var viz = string.Equals(_displayMode, "visualizer", StringComparison.OrdinalIgnoreCase);
+        var immersive = cd || viz;
+
+        // Album / playlist / lyrics visibility
+        AlbumView.Visibility = viz ? Visibility.Collapsed : Visibility.Visible;
+        PlaylistPage.Visibility = Visibility.Collapsed;  // always hidden in viz mode
+        LyricsPage.Visibility = Visibility.Collapsed;
+
+        // Visualizer view visibility
+        VisualizerView.Visibility = viz ? Visibility.Visible : Visibility.Collapsed;
 
         TitleBarControl.Opacity = cd ? 0 : 1;
         TitleBarControl.IsHitTestVisible = !cd;
         TitleBarControl.Height = cd ? 0 : 32;
-        NpBackground.Visibility = cd ? Visibility.Collapsed : Visibility.Visible;
-        PlaybackBar.Visibility = cd ? Visibility.Collapsed : Visibility.Visible;
-        InfoChips.Visibility = cd ? Visibility.Collapsed : Visibility.Visible;
-        PlaylistButton.Visibility = cd ? Visibility.Collapsed : Visibility.Visible;
-        LyricsButton.Visibility = cd ? Visibility.Collapsed : Visibility.Visible;
-        LibraryButton.Visibility = cd ? Visibility.Collapsed : Visibility.Visible;
-        EqButton.Visibility = cd ? Visibility.Collapsed : Visibility.Visible;
+        ApplyVisualizerTitleBarChrome(viz);
+        NpBackground.Visibility = immersive ? Visibility.Collapsed : Visibility.Visible;
+        PlaybackBar.Visibility = immersive ? Visibility.Collapsed : Visibility.Visible;
+        InfoChips.Visibility = immersive ? Visibility.Collapsed : Visibility.Visible;
+        PlaylistButton.Visibility = immersive ? Visibility.Collapsed : Visibility.Visible;
+        LyricsButton.Visibility = immersive ? Visibility.Collapsed : Visibility.Visible;
+        LibraryButton.Visibility = immersive ? Visibility.Collapsed : Visibility.Visible;
+        EqButton.Visibility = immersive ? Visibility.Collapsed : Visibility.Visible;
         NowPlayingDisc.Margin = cd ? new Thickness(0) : new Thickness(0, 0, 0, 72);
         NowPlayingInfo.Margin = cd ? new Thickness(24) : new Thickness(24, 0, 24, 72);
         DiscBase.Effect = cd ? null : _discShadow;
 
         if (cd)
         {
+            // CD mode keeps a fully transparent window surface (desktop shows around the disc).
             WindowFrame.Background = Brushes.Transparent;
+            WindowFrame.BorderBrush = null;
+            WindowFrame.BorderThickness = new Thickness(0);
+            WindowFrame.CornerRadius = new CornerRadius(0);
+            EnsureTransparentWindowBackground();
+        }
+        else if (viz)
+        {
+            // Visualizer mode uses an opaque, theme-tinted surface. It must not be transparent:
+            // layered windows skip fully-transparent pixels during hit testing, which made the
+            // title bar un-draggable (and the caption buttons hard to click).
+            WindowFrame.Background = _vizSurfaceBrush;
             WindowFrame.BorderBrush = null;
             WindowFrame.BorderThickness = new Thickness(0);
             WindowFrame.CornerRadius = new CornerRadius(0);
@@ -943,13 +1047,43 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
             WindowFrame.CornerRadius = new CornerRadius(FrameCornerRadius);
         }
 
-        if (cd)
+        if (viz)
         {
+            SyncVisualizerTheme();
             _page = null;
             ApplyPage();
             CloseOverlays();
             Stage.Visibility = Visibility.Visible;
             SyncTitleBarBackdrop();
+
+            // Start visualizer
+            if (!_visualizerEngine.IsRunning)
+            {
+                // Wait until VisualizerView is laid out
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    if (VisualizerView.ActualWidth > 10 && VisualizerView.ActualHeight > 10)
+                    {
+                        _visualizerEngine.SetBitmapSize(
+                            (int)Math.Round(VisualizerView.ActualWidth),
+                            (int)Math.Round(VisualizerView.ActualHeight));
+                        VisualizerImage.Source = _visualizerEngine.Bitmap;
+                        _visualizerEngine.Start(_reduceMotion);
+                    }
+                }), DispatcherPriority.Loaded);
+            }
+            VisualizerTitleText.Text = _currentIndex >= 0 ? _songs[_currentIndex].Title : "还没有歌曲";
+            VisualizerSubText.Text = _currentIndex >= 0
+                ? (string.IsNullOrWhiteSpace(_songs[_currentIndex].Song.Album)
+                    ? _songs[_currentIndex].Artist
+                    : $"{_songs[_currentIndex].Artist} · {_songs[_currentIndex].Song.Album}")
+                : "";
+            VisualizerInfoOverlay.Visibility = _visualizerShowInfo ? Visibility.Visible : Visibility.Collapsed;
+        }
+        else
+        {
+            // Stop visualizer
+            _visualizerEngine.Stop();
         }
 
         ApplyCdWindow(cd);
@@ -1105,9 +1239,51 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 
     private void ViewMode_Click(object sender, RoutedEventArgs e)
     {
-        _displayMode = string.Equals(_displayMode, "cd", StringComparison.OrdinalIgnoreCase) ? "normal" : "cd";
-        ApplyDisplayMode();
-        SaveSettings();
+        // First open: build a single reusable context menu offering the three modes.
+        if (ViewModeButton.ContextMenu is null)
+        {
+            var menu = new ContextMenu();
+            menu.Items.Add(CreateModeMenuItem("normal", "普通模式"));
+            menu.Items.Add(CreateModeMenuItem("cd", "CD 唱片模式"));
+            menu.Items.Add(CreateModeMenuItem("visualizer", "音频可视化"));
+            menu.Placement = PlacementMode.Bottom;
+            menu.PlacementTarget = ViewModeButton;
+            ViewModeButton.ContextMenu = menu;
+        }
+
+        var cm = ViewModeButton.ContextMenu;
+        foreach (var item in cm.Items)
+        {
+            if (item is MenuItem mi)
+                mi.IsChecked = string.Equals((string?)mi.Tag, _displayMode, StringComparison.OrdinalIgnoreCase);
+        }
+
+        cm.IsOpen = true;
+        e.Handled = true;
+    }
+
+    private MenuItem CreateModeMenuItem(string mode, string header)
+    {
+        var item = new MenuItem
+        {
+            Header = header,
+            Tag = mode,
+            IsCheckable = true
+        };
+        item.Click += ModeMenuItem_Click;
+        return item;
+    }
+
+    private void ModeMenuItem_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is MenuItem mi && mi.Tag is string mode &&
+            !string.Equals(mode, _displayMode, StringComparison.OrdinalIgnoreCase))
+        {
+            _displayMode = mode;
+            ApplyDisplayMode();
+            SaveSettings();
+        }
+        ViewModeButton.ContextMenu?.SetCurrentValue(ContextMenu.IsOpenProperty, false);
     }
 
     private void ExitCdMode_Click(object sender, RoutedEventArgs e)
@@ -2117,9 +2293,9 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         SettingsBody.Children.Add(Card("动效", motion));
 
         var display = new StackPanel();
-        display.Children.Add(Field("界面模式", "普通保留完整控制；CD 唱片仅显示旋转唱片，按左 / 中 / 右分区切歌", Segment(new[] { "普通", "CD 唱片" }, _displayMode == "cd" ? 1 : 0, index =>
+        display.Children.Add(Field("界面模式", "普通 → CD 唱片 → 可视化，点击窗口右上角唱片图标切换", Segment(new[] { "普通", "CD 唱片", "可视化" }, _displayMode switch { "cd" => 1, "visualizer" => 2, _ => 0 }, index =>
         {
-            _displayMode = index == 1 ? "cd" : "normal";
+            _displayMode = index switch { 1 => "cd", 2 => "visualizer", _ => "normal" };
             ApplyDisplayMode();
             SaveSettings();
         })));
@@ -2137,6 +2313,27 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         window.Children.Add(SliderRow("窗口透明度", "数值越大越透明（可透出桌面），100% 时完全隐藏，可由托盘恢复", 0.0, 1.0, 0.05, Math.Round(1.0 - _windowOpacity, 2),
             v => $"{v * 100:0}%", value => { ApplyWindowOpacity(1.0 - value); SaveSettings(); }));
         SettingsBody.Children.Add(Card("窗口", window));
+
+        // Visualizer settings
+        var vizPanel = new StackPanel();
+        var renderers = _visualizerEngine.AllRenderers;
+        var styleLabels = renderers.Select(r => r.DisplayName).ToArray();
+        var styleIds = renderers.Select(r => r.StyleId).ToArray();
+        int selectedIdx = Math.Max(0, Array.IndexOf(styleIds, _visualizerStyle));
+        vizPanel.Children.Add(Field("可视化风格", "切换不同的音频反应效果", Segment(styleLabels, selectedIdx, index =>
+        {
+            _visualizerStyle = styleIds[index];
+            _visualizerEngine.SetStyle(_visualizerStyle);
+            SaveSettings();
+        })));
+        vizPanel.Children.Add(Field("显示歌曲信息叠加层", "可视化模式下在底部显示标题/艺术家", Switch(_visualizerShowInfo, value =>
+        {
+            _visualizerShowInfo = value;
+            if (string.Equals(_displayMode, "visualizer", StringComparison.OrdinalIgnoreCase))
+                VisualizerInfoOverlay.Visibility = value ? Visibility.Visible : Visibility.Collapsed;
+            SaveSettings();
+        })));
+        SettingsBody.Children.Add(Card("可视化", vizPanel));
     }
 
     private FrameworkElement SliderRow(string label, string? sub, double min, double max, double step, double value,
@@ -2502,6 +2699,8 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         public string DownloadFolder { get; set; } = "";
         public bool EqEnabled { get; set; }
         public List<double>? EqGains { get; set; }
+        public string VisualizerStyle { get; set; } = "stardust";
+        public bool VisualizerShowInfo { get; set; } = true;
     }
 
     public sealed class SongRow
