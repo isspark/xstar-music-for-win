@@ -22,7 +22,7 @@ namespace Xstar.Music.App;
 public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 {
     private readonly LibraryScanner _scanner = new();
-    private readonly MusicDatabase _database;
+    private MusicDatabase _database = null!;
     private readonly IPlayerEngine _player = CreateEngine();
     private readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromMilliseconds(250) };
     private ClockController? _discClock;
@@ -33,6 +33,8 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
     private readonly Dictionary<string, FileSystemWatcher> _watchers = new(StringComparer.OrdinalIgnoreCase);
     private CancellationTokenSource? _scanDebounce;
     private readonly SemaphoreSlim _scanGate = new(1, 1);
+    private bool _scanning;
+    private CancellationTokenSource? _scanCts;
     private int _currentIndex = -1;
     private bool _draggingProgress;
     private bool _restoredOnce;
@@ -75,6 +77,13 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 
     private int _sortMode;
 
+    // EQ state
+    private bool _eqEnabled;
+    private readonly double[] _eqGains = new double[10];
+    private readonly List<Slider> _eqSliders = new();
+    private readonly List<TextBlock> _eqGainTexts = new();
+    private bool _suppressEqSave;
+
     private readonly string _settingsPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "XstarMusic", "settings.json");
     private readonly OnlineLyricsProvider _lyricsProvider = new(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "XstarMusic", "lyrics"));
     private readonly string _dataDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "XstarMusic");
@@ -101,7 +110,6 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
     public MainWindow()
     {
         InitializeComponent();
-        _database = new MusicDatabase(Path.Combine(_dataDirectory, "xstar.db"));
         SongList.ItemsSource = _songs;
 
         _player.Opened += (_, _) => Dispatcher.Invoke(() =>
@@ -373,6 +381,16 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 
     private async Task LoadAsync()
     {
+        // Initialize DB lazily on Loaded — avoids XAML parse failure if the DB is
+        // temporarily locked by orphan tray processes. Retry inside MusicDatabase handles
+        // short locks; if it still fails we show a toast instead of crashing the window.
+        try { _database = await Task.Run(() => new MusicDatabase(Path.Combine(_dataDirectory, "xstar.db"))); }
+        catch (Exception ex)
+        {
+            try { File.AppendAllText(Path.Combine(Path.GetTempPath(), "XstarStartup.log"), $"[{DateTime.Now:O}] DB INIT FAIL\n{ex}\n"); } catch { }
+            MessageBox.Show($"数据库初始化失败：{ex.Message}\n\n{ex}", "数据库错误", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
         try
         {
             if (File.Exists(_settingsPath))
@@ -401,6 +419,10 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
                 _jamendoClientId = state?.JamendoClientId ?? "";
                 _downloadFolder = state?.DownloadFolder ?? "";
                 _jamendo.ClientId = _jamendoClientId;
+                _eqEnabled = state?.EqEnabled ?? false;
+                var gains = state?.EqGains;
+                if (gains is not null && gains.Count == _eqGains.Length)
+                    for (var i = 0; i < _eqGains.Length; i++) _eqGains[i] = gains[i];
             }
             ThemeManager.ApplyPreset(ThemeManager.GetPreset(_themePreset));
             ThemeManager.SetMode(ParseTheme(_themeName));
@@ -413,6 +435,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
             else RenderQueue();
             UpdateDiscRotation();
             ApplyDisplayMode();
+            ApplyEqToEngine();
         }
         catch { /* 首次启动或损坏配置不阻断应用 */ }
     }
@@ -445,7 +468,9 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
                 ThemePreset = _themePreset,
                 AccentSource = _accentSource,
                 JamendoClientId = _jamendoClientId,
-                DownloadFolder = _downloadFolder
+                DownloadFolder = _downloadFolder,
+                EqEnabled = _eqEnabled,
+                EqGains = _eqGains.ToList()
             }));
         }
         catch { }
@@ -455,6 +480,18 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 
     private async Task ScanAsync()
     {
+        // Cancel any previous scan (debounce + running)
+        _scanDebounce?.Cancel();
+        var prev = _scanCts;
+        prev?.Cancel();
+        // Allow a brief moment for the previous Task to observe cancellation
+        if (_scanning) await Task.Delay(50);
+
+        var cts = new CancellationTokenSource();
+        _scanCts = cts;
+        _scanning = true;
+        OnScanStatusChanged(true);
+
         try
         {
             if (_folders.Count == 0)
@@ -464,25 +501,97 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
                 RenderLibrary();
                 return;
             }
-            await _scanGate.WaitAsync();
-            try
+
+            var progress = new Progress<(int Done, int Total, string Status)>(p =>
             {
-                var songs = await _scanner.ScanAsync(_folders);
-                _database.UpsertSongs(songs);
-                _database.ReplaceScanFiles(songs.Select(song => song.Path));
+                if (_settingsScanProgress == null) return;
+                _settingsScanProgress.Maximum = Math.Max(p.Total, 1);
+                _settingsScanProgress.Value = Math.Min(p.Done, p.Total);
+                _settingsScanStatus.Text = p.Status;
+                _settingsScanCount.Text = p.Total > 0 ? $"{p.Done}/{p.Total}" : "";
+            });
+
+            // Heavy work off UI thread
+            var snapshot = await Task.Run(async () =>
+            {
+                var scanned = await _scanner.ScanAsync(_folders, progress, cts.Token);
+                cts.Token.ThrowIfCancellationRequested();
+
+                _database.UpsertSongs(scanned);
+                _database.ReplaceScanFiles(scanned.Select(song => song.Path));
                 _database.RemoveMissingFiles();
-                RefreshLibraryMeta();
-                _songs.Clear();
-                foreach (var song in _database.ReadSongs()) _songs.Add(new SongRow(song, _songs.Count + 1) { IsFavorite = _favoriteIds.Contains(song.Id) });
-                RenderQueue();
-                RenderLibrary();
-                ConfigureWatchers();
-                if (!_restoredOnce) { _restoredOnce = true; RestorePlayback(); }
-            }
-            finally { _scanGate.Release(); }
+
+                var favorites = _database.ReadFavoriteIds();
+                var histories = _database.ReadHistory();
+                var playlists = _database.ReadPlaylists();
+                var playlistSongs = new Dictionary<int, HashSet<string>>();
+                foreach (var p in playlists) playlistSongs[p.Id] = _database.ReadPlaylistSongIds(p.Id);
+
+                var dbSongs = _database.ReadSongs();
+                var rows = new List<SongRow>(dbSongs.Count);
+                var idx = 1;
+                foreach (var song in dbSongs)
+                    rows.Add(new SongRow(song, idx++) { IsFavorite = favorites.Contains(song.Id) });
+                return (rows, favorites, histories, playlists, playlistSongs);
+            }, cts.Token);
+
+            // Apply on UI thread
+            if (_settingsScanStatus != null) _settingsScanStatus.Text = "正在刷新界面…";
+            _favoriteIds = snapshot.favorites;
+            _historyTicks = snapshot.histories;
+            _playlists = snapshot.playlists;
+            _playlistSongs.Clear();
+            foreach (var kv in snapshot.playlistSongs) _playlistSongs[kv.Key] = kv.Value;
+            _songs.Clear();
+            foreach (var row in snapshot.rows) _songs.Add(row);
+            RenderQueue();
+            RenderLibrary();
+            ConfigureWatchers();
+            if (!_restoredOnce) { _restoredOnce = true; RestorePlayback(); }
+            if (_settingsScanStatus != null) _settingsScanStatus.Text = $"完成，共 {snapshot.rows.Count} 首";
+            SaveSettings();
         }
-        catch (OperationCanceledException) { }
-        catch (Exception ex) { MessageBox.Show($"扫描失败：{ex.Message}", "扫描失败", MessageBoxButton.OK, MessageBoxImage.Warning); }
+        catch (OperationCanceledException)
+        {
+            if (_settingsScanStatus != null) _settingsScanStatus.Text = "已取消";
+        }
+        catch (Exception ex)
+        {
+            if (_settingsScanStatus != null) _settingsScanStatus.Text = "扫描失败";
+            MessageBox.Show($"扫描失败：{ex.Message}\n\n{ex}", "扫描失败", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        finally
+        {
+            // Reference check: if a newer scan replaced us, don't clear its state.
+            if (_scanCts == cts) { _scanning = false; _scanCts = null; OnScanStatusChanged(false); }
+            cts.Dispose();
+        }
+    }
+
+    private void CancelScan()
+    {
+        _scanCts?.Cancel();
+        _scanDebounce?.Cancel();
+    }
+
+    private void ScanCancel_Click(object sender, RoutedEventArgs e) => CancelScan();
+
+    private StackPanel? _settingsScanArea;
+    private ProgressBar? _settingsScanProgress;
+    private TextBlock? _settingsScanStatus;
+    private TextBlock? _settingsScanCount;
+
+    private void OnScanStatusChanged(bool scanning)
+    {
+        if (_settingsScanArea == null) return;
+        _settingsScanArea.Visibility = scanning ? Visibility.Visible : Visibility.Collapsed;
+        if (scanning)
+        {
+            _settingsScanProgress!.Value = 0;
+            _settingsScanProgress.Maximum = 1;
+            _settingsScanStatus!.Text = "正在扫描…";
+            _settingsScanCount!.Text = "";
+        }
     }
 
     private void RefreshLibraryMeta()
@@ -813,6 +922,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         PlaylistButton.Visibility = cd ? Visibility.Collapsed : Visibility.Visible;
         LyricsButton.Visibility = cd ? Visibility.Collapsed : Visibility.Visible;
         LibraryButton.Visibility = cd ? Visibility.Collapsed : Visibility.Visible;
+        EqButton.Visibility = cd ? Visibility.Collapsed : Visibility.Visible;
         NowPlayingDisc.Margin = cd ? new Thickness(0) : new Thickness(0, 0, 0, 72);
         NowPlayingInfo.Margin = cd ? new Thickness(24) : new Thickness(24, 0, 24, 72);
         DiscBase.Effect = cd ? null : _discShadow;
@@ -1440,6 +1550,164 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
             CenterActiveLyric(CdLyricsView, _cdLyricBlocks[current]);
     }
 
+    /* ===================== equalizer ===================== */
+
+    private void ApplyEqToEngine()
+    {
+        _player.SetEqualizerEnabled(_eqEnabled);
+        for (var i = 0; i < _eqGains.Length; i++)
+            _player.SetEqualizerBand(i, _eqGains[i]);
+    }
+
+    private static readonly string[] EqBandFrequencies = { "80", "125", "250", "500", "1k", "2k", "4k", "8k", "12k", "16k" };
+
+    private void Eq_Click(object sender, RoutedEventArgs e)
+    {
+        EqPopup.IsOpen = true;
+        if (EqBandsPanel.Items.Count == 0) BuildEqPanel();
+        EqEnableToggle.IsChecked = _eqEnabled;
+        EqEnableToggle.Content = _eqEnabled ? "开启" : "关闭";
+    }
+
+    private void EqEnable_Click(object sender, RoutedEventArgs e)
+    {
+        _eqEnabled = EqEnableToggle.IsChecked == true;
+        EqEnableToggle.Content = _eqEnabled ? "开启" : "关闭";
+        ApplyEqToEngine();
+        SaveSettings();
+        UpdateEqBandSlidersEnabled();
+    }
+
+    private void UpdateEqBandSlidersEnabled()
+    {
+        foreach (var slider in _eqSliders) slider.IsEnabled = _eqEnabled;
+    }
+
+    private void BuildEqPanel()
+    {
+        EqBandsPanel.Items.Clear();
+        _eqSliders.Clear();
+        _eqGainTexts.Clear();
+        for (var band = 0; band < _eqGains.Length; band++)
+        {
+            var gain = _eqGains[band];
+            var column = new StackPanel { Orientation = Orientation.Vertical, Width = 28, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 0, 6, 0) };
+            if (band == _eqGains.Length - 1) column.Margin = new Thickness(0, 0, 0, 0);
+
+            var gainText = new TextBlock
+            {
+                Text = $"{gain:0}",
+                FontSize = 10,
+                Foreground = ResBrush("TextMutedBrush"),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Margin = new Thickness(0, 0, 0, 2)
+            };
+
+            var slider = new Slider
+            {
+                Orientation = Orientation.Vertical,
+                Height = 120,
+                Minimum = -12,
+                Maximum = 12,
+                TickFrequency = 1,
+                IsSnapToTickEnabled = true,
+                Value = gain,
+                IsEnabled = _eqEnabled,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                SmallChange = 1,
+                LargeChange = 2
+            };
+            var bandIndex = band;
+            slider.ValueChanged += (_, args) =>
+            {
+                _eqGains[bandIndex] = args.NewValue;
+                gainText.Text = $"{args.NewValue:0}";
+                _player.SetEqualizerBand(bandIndex, args.NewValue);
+                if (_eqEnabled && !_suppressEqSave) SaveSettings();
+            };
+
+            var freqText = new TextBlock
+            {
+                Text = EqBandFrequencies[band],
+                FontSize = 9,
+                Foreground = ResBrush("TextMutedBrush"),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Margin = new Thickness(0, 2, 0, 0)
+            };
+
+            _eqSliders.Add(slider);
+            _eqGainTexts.Add(gainText);
+            column.Children.Add(gainText);
+            column.Children.Add(slider);
+            column.Children.Add(freqText);
+            EqBandsPanel.Items.Add(column);
+        }
+
+        // Preset buttons
+        EqPresetsPanel.Children.Clear();
+        var presets = new (string Name, double[] Gains)[]
+        {
+            ("Flat", new double[10]),
+            ("摇滚", new[] { 5.0, 4.0, 3.0, 1.0, -1.0, -1.0, 1.0, 3.0, 4.0, 5.0 }),
+            ("流行", new[] { -1.0, 2.0, 4.0, 5.0, 4.0, 2.0, 0.0, -1.0, -1.0, 0.0 }),
+            ("爵士", new[] { 3.0, 2.0, 1.0, 2.0, -1.0, -1.0, 0.0, 1.0, 2.0, 3.0 }),
+            ("古典", new[] { 4.0, 3.0, 2.0, 0.0, 0.0, 0.0, 0.0, 2.0, 3.0, 4.0 }),
+            ("人声", new[] { -2.0, -1.0, 0.0, 2.0, 4.0, 4.0, 3.0, 1.0, 0.0, -1.0 }),
+            ("低音增强", new[] { 7.0, 6.0, 4.0, 2.0, 0.0, -1.0, -2.0, -2.0, -3.0, -4.0 }),
+            ("高音增强", new[] { 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 3.0, 4.0, 6.0, 7.0 }),
+            ("电子", new[] { 5.0, 4.0, 2.0, 0.0, -2.0, 1.0, 3.0, 4.0, 4.0, 3.0 }),
+            ("嘻哈", new[] { 5.0, 4.0, 3.0, 1.0, -1.0, -1.0, -2.0, 1.0, 3.0, 5.0 }),
+            ("舞曲", new[] { 5.0, 4.0, 3.0, 0.0, -2.0, 0.0, 2.0, 4.0, 5.0, 5.0 }),
+            ("明亮", new[] { 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 5.0, 4.0 }),
+            ("柔和", new[] { 0.0, 1.0, 2.0, 2.0, 2.0, 1.0, 0.0, -1.0, -1.0, 0.0 }),
+            ("蓝调", new[] { 3.0, 3.0, 2.0, 1.0, 0.0, -1.0, -1.0, 1.0, 2.0, 3.0 }),
+            ("电影", new[] { 4.0, 4.0, 3.0, 1.0, 0.0, -1.0, 0.0, 2.0, 4.0, 5.0 }),
+        };
+        foreach (var preset in presets)
+        {
+            var name = preset.Name;
+            var gains = preset.Gains;
+            var btn = new Button
+            {
+                Content = name,
+                Padding = new Thickness(10, 4, 10, 4),
+                Margin = new Thickness(0, 0, 6, 0),
+                FontSize = 11,
+                Style = (Style)FindResource("GhostButton")
+            };
+            btn.Click += (_, _) => ApplyEqPreset(gains);
+            EqPresetsPanel.Children.Add(btn);
+        }
+    }
+
+    private void ApplyEqPreset(double[] gains)
+    {
+        for (var i = 0; i < Math.Min(gains.Length, _eqGains.Length); i++)
+        {
+            _eqGains[i] = gains[i];
+            _player.SetEqualizerBand(i, gains[i]);
+        }
+        _eqEnabled = true;
+        ApplyEqToEngine();
+
+        // Refresh UI
+        _suppressEqSave = true;
+        try
+        {
+            EqEnableToggle.IsChecked = true;
+            EqEnableToggle.Content = "开启";
+            UpdateEqBandSlidersEnabled();
+            for (var i = 0; i < _eqGains.Length && i < _eqSliders.Count; i++)
+            {
+                _eqSliders[i].Value = _eqGains[i];
+                _eqGainTexts[i].Text = $"{_eqGains[i]:0}";
+            }
+        }
+        finally { _suppressEqSave = false; }
+
+        SaveSettings();
+    }
+
     /// <summary>Scrolls the lyric view so the active line is vertically centred.</summary>
     private void CenterActiveLyric(ScrollViewer view, TextBlock block)
     {
@@ -1764,7 +2032,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         RefreshFolders();
 
         var add = new Button { Content = "＋ 添加文件夹", Style = (Style)FindResource("PrimaryActionButton"), Padding = new Thickness(14, 8, 14, 8), Margin = new Thickness(0, 10, 8, 0) };
-        add.Click += (_, _) =>
+        add.Click += async (_, _) =>
         {
             var picker = new Microsoft.Win32.OpenFolderDialog { Title = "选择音乐文件夹" };
             if (picker.ShowDialog(this) == true && !string.IsNullOrWhiteSpace(picker.FolderName)
@@ -1773,6 +2041,8 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
                 _folders.Add(picker.FolderName);
                 SaveSettings();
                 RefreshFolders();
+                // 选择完文件夹立即触发扫描，扫描进度显示在“重新扫描”下方
+                await ScanAsync();
             }
         };
         var rescan = new Button { Content = "⟳ 重新扫描", Style = (Style)FindResource("GhostButton"), Padding = new Thickness(14, 8, 14, 8), Margin = new Thickness(0, 10, 0, 0) };
@@ -1780,9 +2050,23 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         var buttons = new StackPanel { Orientation = Orientation.Horizontal };
         buttons.Children.Add(add); buttons.Children.Add(rescan);
 
+        // 扫描进度提示（仅扫描时显示在“重新扫描”下方）
+        _settingsScanArea = new StackPanel { Visibility = Visibility.Collapsed, Margin = new Thickness(0, 14, 0, 0) };
+        if (_scanning) _settingsScanArea.Visibility = Visibility.Visible;
+        _settingsScanStatus = new TextBlock { Text = "正在扫描…", FontSize = 11.5, Foreground = ResBrush("TextSecondaryBrush"), Margin = new Thickness(0, 0, 0, 4) };
+        _settingsScanCount = new TextBlock { FontSize = 10.5, Foreground = ResBrush("TextMutedBrush") };
+        _settingsScanProgress = new ProgressBar { Height = 4, Maximum = 1, Margin = new Thickness(0, 8, 0, 0) };
+        var cancelBtn = new Button { Content = "取消", Style = (Style)FindResource("GhostButton"), Padding = new Thickness(10, 3, 10, 3), FontSize = 11, HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 6, 0, 0) };
+        cancelBtn.Click += ScanCancel_Click;
+        _settingsScanArea.Children.Add(_settingsScanStatus);
+        _settingsScanArea.Children.Add(_settingsScanCount);
+        _settingsScanArea.Children.Add(_settingsScanProgress);
+        _settingsScanArea.Children.Add(cancelBtn);
+
         var stack = new StackPanel();
         stack.Children.Add(folderList);
         stack.Children.Add(buttons);
+        stack.Children.Add(_settingsScanArea);
 
         SettingsBody.Children.Add(Card("音乐文件夹", stack));
 
@@ -2165,12 +2449,10 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         {
             await Task.Delay(700, cancellationToken);
             if (!cancellationToken.IsCancellationRequested)
-                _ = Dispatcher.BeginInvoke(new Action(ScanOnUi));
+                await Dispatcher.InvokeAsync(ScanAsync);
         }
         catch (OperationCanceledException) { }
     }
-
-    private void ScanOnUi() => _ = ScanAsync();
 
     /* ===================== input ===================== */
 
@@ -2218,6 +2500,8 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         public string AccentSource { get; set; } = "cover";
         public string JamendoClientId { get; set; } = "";
         public string DownloadFolder { get; set; } = "";
+        public bool EqEnabled { get; set; }
+        public List<double>? EqGains { get; set; }
     }
 
     public sealed class SongRow

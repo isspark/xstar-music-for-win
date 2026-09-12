@@ -6,21 +6,35 @@ public sealed class LibraryScanner
     private static readonly HashSet<string> Extensions = new(StringComparer.OrdinalIgnoreCase)
     { ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".wav", ".wma" };
 
-    public async Task<IReadOnlyList<Song>> ScanAsync(IEnumerable<string> folders, IProgress<int>? progress = null, CancellationToken cancellationToken = default)
+    /// <summary>
+    /// Progress tuple: (scanned current file, total file count).
+    /// </summary>
+    public async Task<IReadOnlyList<Song>> ScanAsync(
+        IEnumerable<string> folders,
+        IProgress<(int Done, int Total, string Status)>? progress = null,
+        CancellationToken cancellationToken = default)
     {
+        // Phase 1: fast file enumeration (just disk I/O, no heavy decode).
+        progress?.Report((0, 0, "正在扫描文件夹…"));
         var files = folders.Where(Directory.Exists)
             .SelectMany(EnumerateFilesSafely)
             .Where(path => Extensions.Contains(Path.GetExtension(path)))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
-        var songs = new List<Song>(files.Length);
-        for (var i = 0; i < files.Length; i++)
+        var total = files.Length;
+        progress?.Report((0, total, $"发现 {total} 个文件，读取元数据中…"));
+
+        // Phase 2: metadata decode — heavy CPU/IO, runs on ThreadPool.
+        var songs = new List<Song>(total);
+        for (var i = 0; i < total; i++)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            songs.Add(_metadata.Read(files[i]));
-            progress?.Report(i + 1);
-            if (i % 64 == 0) await Task.Yield();
+            var song = await Task.Run(() => _metadata.Read(files[i]), cancellationToken);
+            songs.Add(song);
+            if (i % 8 == 0 || i == total - 1)
+                progress?.Report((i + 1, total, $"读取元数据 {i + 1}/{total}"));
         }
+        progress?.Report((total, total, "扫描完成"));
         return songs;
     }
 

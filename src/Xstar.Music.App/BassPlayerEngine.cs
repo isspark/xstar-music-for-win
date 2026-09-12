@@ -1,5 +1,6 @@
 using System.IO;
 using ManagedBass;
+using ManagedBass.DirectX8;
 using Xstar.Music.Core;
 
 namespace Xstar.Music.App;
@@ -7,6 +8,10 @@ namespace Xstar.Music.App;
 public sealed class BassPlayerEngine : IPlayerEngine
 {
     private static readonly string[] PluginFiles = { "bassflac.dll", "bassopus.dll", "bassalac.dll", "bassape.dll" };
+    private static readonly double[] EqBands = { 80, 125, 250, 500, 1000, 2000, 4000, 8000, 12000, 16000 };
+    public static int EqBandCount => EqBands.Length;
+    public static double GetEqBandFrequency(int band) => EqBands[band];
+
     private static bool _initialized;
     private readonly SyncProcedure _endSync;
     private int _stream;
@@ -15,6 +20,12 @@ public sealed class BassPlayerEngine : IPlayerEngine
     private double _volume = 1;
     private TimeSpan _duration;
     private PlaybackMode _mode = PlaybackMode.Sequential;
+
+    // EQ state
+    private DXParamEQ? _eqFx;
+    private int[] _eqBandIndices = Array.Empty<int>();
+    private bool _eqEnabled;
+    private readonly double[] _eqGains = new double[EqBands.Length];
 
     public BassPlayerEngine()
     {
@@ -65,6 +76,7 @@ public sealed class BassPlayerEngine : IPlayerEngine
         _duration = seconds > 0 ? TimeSpan.FromSeconds(seconds) : TimeSpan.Zero;
         Bass.ChannelSetSync(_stream, SyncFlags.End, 0, _endSync);
         Bass.ChannelSetAttribute(_stream, ChannelAttribute.Volume, (float)_volume);
+        ApplyEqToStream();
         _isPlaying = false;
         Opened?.Invoke(this, EventArgs.Empty);
         SnapshotChanged?.Invoke(this, EventArgs.Empty);
@@ -113,6 +125,58 @@ public sealed class BassPlayerEngine : IPlayerEngine
         SnapshotChanged?.Invoke(this, EventArgs.Empty);
     }
 
+    public void SetEqualizerEnabled(bool enabled)
+    {
+        _eqEnabled = enabled;
+        if (_stream != 0)
+        {
+            if (enabled) ApplyEqToStream();
+            else FreeEqFx();
+        }
+    }
+
+    public void SetEqualizerBand(int band, double gainDb)
+    {
+        if (band < 0 || band >= EqBands.Length) return;
+        _eqGains[band] = Math.Clamp(gainDb, -12, 12);
+        if (_eqEnabled && _eqFx is not null)
+        {
+            var bandIndex = _eqBandIndices[band];
+            _eqFx.UpdateBand(bandIndex, _eqGains[band]);
+        }
+    }
+
+    private void ApplyEqToStream()
+    {
+        FreeEqFx();
+        if (_stream == 0 || !_eqEnabled) return;
+        try
+        {
+            _eqFx = new DXParamEQ(_stream, 0);
+            _eqBandIndices = new int[EqBands.Length];
+            for (var i = 0; i < EqBands.Length; i++)
+            {
+                _eqBandIndices[i] = _eqFx.AddBand(EqBands[i]);
+                if (_eqGains[i] != 0)
+                    _eqFx.UpdateBand(_eqBandIndices[i], _eqGains[i]);
+            }
+        }
+        catch
+        {
+            FreeEqFx();
+        }
+    }
+
+    private void FreeEqFx()
+    {
+        if (_eqFx is not null)
+        {
+            _eqFx.Dispose();
+            _eqFx = null;
+        }
+        _eqBandIndices = Array.Empty<int>();
+    }
+
     public void Dispose() => FreeStream();
 
     private void OnEnded(int handle, int channel, int data, IntPtr user)
@@ -123,6 +187,7 @@ public sealed class BassPlayerEngine : IPlayerEngine
 
     private void FreeStream()
     {
+        FreeEqFx();
         if (_stream != 0)
         {
             Bass.ChannelStop(_stream);

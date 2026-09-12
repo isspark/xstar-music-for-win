@@ -22,4 +22,8 @@ public interface IPlayerEngine : IDisposable
     void Seek(TimeSpan position);
     void SetVolume(double volume);
     void SetMode(PlaybackMode mode);
+
+    // EQ — default implementation is a no-op so MediaPlayerEngine stays compatible.
+    virtual void SetEqualizerEnabled(bool enabled) { }
+    virtual void SetEqualizerBand(int band, double gainDb) { }
 }
