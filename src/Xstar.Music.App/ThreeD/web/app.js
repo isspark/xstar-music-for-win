@@ -17,6 +17,17 @@ window.addEventListener("unhandledrejection", (event) => {
   action("clientError", { message: `unhandled rejection: ${event.reason}` });
 });
 
+// Desktop-wallpaper mode: the C# host loads index.html?wallpaper=1 and reparents the window
+// behind the desktop icons. All self-drawn UI is hidden; only scene + lyrics remain.
+const WALLPAPER = new URLSearchParams(location.search).get("wallpaper") === "1";
+if (WALLPAPER) {
+  document.body.classList.add("wallpaper");
+  // Esc leaves the interactive (above-desktop) mode and returns to the plain wallpaper.
+  window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") action("setSetting", { key: "wallpaperInteractive", value: false });
+  });
+}
+
 const canvas = document.getElementById("stage");
 const stage = createStage(canvas, "balanced");
 
@@ -26,18 +37,44 @@ let presetIndex = 0;
 const cover = createCover(stage.scene, stage.tier.grid, "#22c55e");
 cover.setPreset(presetIndex);
 
-const shelfScene = new THREE.Scene();
-const shelf = createShelf({
-  scene: shelfScene,
-  camera: stage.camera,
-  canvas,
-  requestDetail: (id) => action("getDetail", { id }),
-  requestCardArtwork: (id) => action("getCardArtwork", { id }),
-  play: (id) => action("playTrack", { id }),
-});
-// Rendered after bloom so the card titles keep their edge instead of blowing out white.
-stage.addOverlayScene(shelfScene);
-shelf.setPresence("always"); // 默认常驻，便于发现；控制栏可切换为自动隐藏
+/** No-op stand-in for the 3D shelf when running as a wallpaper (cover + stars + lyrics only). */
+function createNullShelf() {
+  return {
+    get detailOpen() { return false; },
+    setViewport() {},
+    isPointerOverContent() { return false; },
+    setAccent() {},
+    setLibrary() {},
+    setArtwork() {},
+    setPresence() {},
+    setCameraMode() {},
+    setMode() {},
+    setLayout() {},
+    openDetail() {},
+    setDetail() {},
+    closeDetail() {},
+    getKind() { return "albums"; },
+    update() {},
+  };
+}
+
+let shelf;
+if (WALLPAPER) {
+  shelf = createNullShelf();
+} else {
+  const shelfScene = new THREE.Scene();
+  shelf = createShelf({
+    scene: shelfScene,
+    camera: stage.camera,
+    canvas,
+    requestDetail: (id) => action("getDetail", { id }),
+    requestCardArtwork: (id) => action("getCardArtwork", { id }),
+    play: (id) => action("playTrack", { id }),
+  });
+  // Rendered after bloom so the card titles keep their edge instead of blowing out white.
+  stage.addOverlayScene(shelfScene);
+  shelf.setPresence("always"); // 默认常驻，便于发现；控制栏可切换为自动隐藏
+}
 
 /* ---------------- camera orbit (drag to rotate, wheel to zoom) ---------------- */
 
@@ -331,7 +368,7 @@ function frame(now) {
   shelf.update(dt, time);
   lyricsStage.update(dt, audio, time);
 
-  stage.bloom.strength = baseBloom * glowMultiplier + audio.beat * 1.2 + Math.max(0, audio.pulse - 0.6) * 0.5;
+  stage.bloom.strength = baseBloom * glowMultiplier + audio.beat * 0.6 + Math.max(0, audio.pulse - 0.6) * 0.3;
   stage.render();
 
   frames++;

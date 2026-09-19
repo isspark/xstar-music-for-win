@@ -42,6 +42,7 @@ export function initChrome(handlers) {
   const bgColorInput = document.getElementById("set-bgcolor");
   const bgImageBtn = document.getElementById("set-bgimg");
   const bgClearBtn = document.getElementById("set-bgclear");
+  const resetBtn = document.getElementById("btn-reset3d");
   const psizeInput = document.getElementById("set-psize");
   const glowInput = document.getElementById("set-glow");
   const pcountInput = document.getElementById("set-pcount");
@@ -169,6 +170,7 @@ export function initChrome(handlers) {
   bgClearBtn.addEventListener("click", () => {
     if (handlers.onClearBackgroundImage) handlers.onClearBackgroundImage();
   });
+  resetBtn.addEventListener("click", () => action("resetSettings"));
 
   [psizeInput, glowInput, pcountInput].forEach((input) => {
     input.addEventListener("input", () => {

@@ -1,0 +1,12 @@
+<Window x:Class="Xstar.Music.App.Wallpaper.WallpaperWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
+        Title="XSTAR Wallpaper"
+        WindowStyle="None" AllowsTransparency="False" ShowInTaskbar="False"
+        ResizeMode="NoResize" WindowStartupLocation="Manual" ShowActivated="False"
+        Background="#05060A" Width="1280" Height="720" Left="0" Top="0">
+    <Grid x:Name="Root" Background="#05060A">
+        <wv2:WebView2 x:Name="WallpaperWebView" />
+    </Grid>
+</Window>

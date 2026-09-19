@@ -17,6 +17,7 @@ using System.Windows.Threading;
 using Hardcodet.Wpf.TaskbarNotification;
 using Xstar.Music.App.Visualizer;
 using Xstar.Music.App.ThreeD;
+using Xstar.Music.App.Wallpaper;
 using Xstar.Music.Core;
 
 namespace Xstar.Music.App;
@@ -115,6 +116,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
 
     // 3D mode (WebView2 + Three.js)
     private readonly ThreeDHost _threeDHost;
+    private readonly WallpaperController _wallpaperController;
     private readonly Dictionary<string, string?> _threeDCardArt = new(StringComparer.Ordinal);
     private string _threeDLibraryKind = "albums";
     private string _threeDQuality = "balanced";
@@ -138,6 +140,10 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
     private string _threeDParticleColor = "";
     private string? _threeDBackgroundData;
     private string _threeDBackgroundDataKey = "";
+
+    // Desktop wallpaper mode (appearance follows the 3D mode settings)
+    private bool _wallpaperEnabled;
+    private bool _wallpaperInteractive;
 
     private readonly string _settingsPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "XstarMusic", "settings.json");
     private readonly OnlineLyricsProvider _lyricsProvider = new(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "XstarMusic", "lyrics"));
@@ -207,6 +213,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
         PopulateOnlineSources();
         _visualizerEngine = new VisualizerEngine(_player);
         _threeDHost = new ThreeDHost(ThreeDWebView, _player, this);
+        _wallpaperController = new WallpaperController(_player, this);
 
         _player.Opened += (_, _) => Dispatcher.Invoke(() =>
         {
@@ -306,6 +313,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
         ThemeManager.Changed -= OnThemeChanged;
         foreach (var watcher in _watchers.Values) watcher.Dispose();
         _visualizerEngine.Dispose();
+        _wallpaperController.Dispose();
         _threeDHost.Dispose();
         if (_source is not null)
         {
@@ -371,6 +379,8 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
         menu.Items.Add(CreateMenuItem("播放 / 暂停", (_, _) => Play_Click(this, new RoutedEventArgs())));
         menu.Items.Add(CreateMenuItem("下一首", (_, _) => Next_Click(this, new RoutedEventArgs())));
         menu.Items.Add(new Separator());
+        menu.Items.Add(CreateMenuItem("桌面壁纸（开关）", ToggleWallpaper_Click));
+        menu.Items.Add(new Separator());
         menu.Items.Add(CreateMenuItem("退出", (_, _) => { _exitRequested = true; Close(); }));
         _tray = new TaskbarIcon
         {
@@ -386,6 +396,40 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
         var item = new MenuItem { Header = header };
         item.Click += handler;
         return item;
+    }
+
+    private async void ToggleWallpaper_Click(object sender, RoutedEventArgs e)
+        => await SetWallpaperEnabledAsync(!_wallpaperEnabled);
+
+    private Task<bool> StartWallpaperAsync() => _wallpaperController.StartAsync(_wallpaperInteractive);
+
+    private async Task SetWallpaperEnabledAsync(bool enabled)
+    {
+        _wallpaperEnabled = enabled;
+        SaveSettings();
+
+        if (!enabled)
+        {
+            _wallpaperController.Stop();
+            return;
+        }
+
+        if (await StartWallpaperAsync()) return;
+        _wallpaperEnabled = false;
+        SaveSettings();
+        Toast($"桌面壁纸启动失败：{_wallpaperController.LastError}");
+    }
+
+    /// <summary>
+    /// Interactive mode lifts the wallpaper above the desktop icons (top-level fullscreen) so it can
+    /// receive the mouse; while active the icons are covered. Toggled from the settings or by Esc.
+    /// </summary>
+    private async Task SetWallpaperInteractiveAsync(bool interactive)
+    {
+        if (_wallpaperInteractive == interactive) return;
+        _wallpaperInteractive = interactive;
+        if (_wallpaperController.IsRunning) await _wallpaperController.SetInteractiveAsync(interactive);
+        SaveSettings();
     }
 
     private void ShowMainWindow()
@@ -673,6 +717,8 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
                 _threeDParticleCount = state?.ThreeDParticleCount is > 0.2 and < 2 ? state.ThreeDParticleCount : 1.0;
                 _threeDParticleColorMode = state?.ThreeDParticleColorMode is >= 0 and <= 2 ? state.ThreeDParticleColorMode : 1;
                 _threeDParticleColor = state?.ThreeDParticleColor ?? "";
+                _wallpaperEnabled = state?.WallpaperEnabled ?? false;
+                _wallpaperInteractive = state?.WallpaperInteractive ?? false;
             }
             ThemeManager.ApplyPreset(ThemeManager.GetPreset(_themePreset));
             ThemeManager.SetMode(ParseTheme(_themeName));
@@ -689,6 +735,10 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
             _visualizerEngine.SetStyle(_visualizerStyle);
             ApplyDisplayMode();
             ApplyEqToEngine();
+#if DEBUG
+            if (Environment.GetEnvironmentVariable("XSTAR_WALLPAPER_TEST") == "1") _wallpaperEnabled = true;
+#endif
+            if (_wallpaperEnabled) _ = StartWallpaperAsync();
         }
         catch { /* 首次启动或损坏配置不阻断应用 */ }
     }
@@ -752,7 +802,9 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
                 ThreeDGlow = _threeDGlow,
                 ThreeDParticleCount = _threeDParticleCount,
                 ThreeDParticleColorMode = _threeDParticleColorMode,
-                ThreeDParticleColor = _threeDParticleColor
+                ThreeDParticleColor = _threeDParticleColor,
+                WallpaperEnabled = _wallpaperEnabled,
+                WallpaperInteractive = _wallpaperInteractive
             }));
         }
         catch { }
@@ -1033,6 +1085,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
         VisualizerTitleText.Text = song.Title;
         VisualizerSubText.Text = string.IsNullOrWhiteSpace(song.Album) ? song.Artist : $"{song.Artist} · {song.Album}";
         _threeDHost.PushArtwork();
+        _wallpaperController.PushArtwork();
     }
 
     private void UpdateNowPlayingGradient()
@@ -1672,18 +1725,20 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
         return JsonSerializer.Serialize(message, ThreeDJson.Options);
     }
 
-    string IThreeDActions.ThreeDGetSettingsJson()
+    string IThreeDActions.ThreeDGetSettingsJson() => BuildThreeDSettingsJson(_threeDQuality, _threeDLyrics);
+
+    private string BuildThreeDSettingsJson(string quality, bool lyrics)
     {
         var message = new ThreeDSettingsMessage
         {
-            Quality = _threeDQuality,
+            Quality = quality,
             ShelfMode = _threeDShelfMode,
             ShelfPresence = _threeDShelfPresence,
             CameraMode = _threeDCameraMode,
             LibraryKind = _threeDLibraryKind,
             CoverPreset = _threeDCoverPreset,
             Bloom = _threeDBloom,
-            Lyrics = _threeDLyrics,
+            Lyrics = lyrics,
             ReduceMotion = _reduceMotion,
             ShelfSize = _threeDShelfSize,
             ShelfOffsetX = _threeDShelfOffsetX,
@@ -1760,24 +1815,28 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
     {
         if (!_player.Snapshot.IsPlaying) Play_Click(this, new RoutedEventArgs());
         _threeDHost.PushState();
+        _wallpaperController.PushState();
     }
 
     void IThreeDActions.ThreeDPause()
     {
         if (_player.Snapshot.IsPlaying) Play_Click(this, new RoutedEventArgs());
         _threeDHost.PushState();
+        _wallpaperController.PushState();
     }
 
     void IThreeDActions.ThreeDNext()
     {
         Next_Click(this, new RoutedEventArgs());
         _threeDHost.PushState();
+        _wallpaperController.PushState();
     }
 
     void IThreeDActions.ThreeDPrev()
     {
         Previous_Click(this, new RoutedEventArgs());
         _threeDHost.PushState();
+        _wallpaperController.PushState();
     }
 
     void IThreeDActions.ThreeDSeek(long positionMs)
@@ -1786,6 +1845,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
         if (duration > TimeSpan.Zero)
             _player.Seek(TimeSpan.FromMilliseconds(Math.Clamp(positionMs, 0, (long)duration.TotalMilliseconds)));
         _threeDHost.PushState();
+        _wallpaperController.PushState();
     }
 
     void IThreeDActions.ThreeDSetVolume(double volume)
@@ -1855,6 +1915,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
         var index = _songs.IndexOf(row);
         if (index >= 0) SelectSong(index, true);
         _threeDHost.PushState();
+        _wallpaperController.PushState();
     }
 
     void IThreeDActions.ThreeDOnSetting(string key, JsonElement? value)
@@ -1884,11 +1945,47 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
                 case "particleCount": _threeDParticleCount = v.GetDouble(); break;
                 case "particleColorMode": _threeDParticleColorMode = v.GetInt32(); break;
                 case "particleColor": _threeDParticleColor = v.GetString() ?? ""; break;
+                case "wallpaperInteractive": _ = SetWallpaperInteractiveAsync(v.GetBoolean()); return;
                 default: return;
             }
             SaveSettings();
+            // The wallpaper shares the 3D appearance settings, so mirror the change live.
+            _wallpaperController.PushSettings();
         }
         catch { }
+    }
+
+    void IThreeDActions.ThreeDResetSettings() => ResetThreeDSettings();
+
+    /// <summary>Restores every 3D-mode setting to its default, persists it and re-applies it live.</summary>
+    private void ResetThreeDSettings()
+    {
+        _threeDQuality = "balanced";
+        _threeDShelfMode = "side";
+        _threeDShelfPresence = "always";
+        _threeDCameraMode = "dynamic";
+        _threeDLibraryKind = "albums";
+        _threeDCoverPreset = 0;
+        _threeDBloom = true;
+        _threeDLyrics = true;
+        _threeDShelfSize = 1.0;
+        _threeDShelfOffsetX = 0;
+        _threeDShelfOffsetY = 0;
+        _threeDShelfAngleY = 0;
+        _threeDShelfOpacity = 1.0;
+        _threeDBackgroundColor = "#05060A";
+        _threeDBackgroundImage = "";
+        _threeDBackgroundData = null;
+        _threeDBackgroundDataKey = "";
+        _threeDParticleSize = 1.0;
+        _threeDGlow = 1.0;
+        _threeDParticleCount = 1.0;
+        _threeDParticleColorMode = 1;
+        _threeDParticleColor = "";
+        SaveSettings();
+        _threeDHost.PushSettings();
+        _wallpaperController.PushSettings();
+        Toast("3D 设置已恢复默认。");
     }
 
     /// <summary>Shows the lyric overlay above the CD (title at top, scrolling lyrics below).</summary>
@@ -2644,6 +2741,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
             _vizLyricBlocks.Add(CreateLyricBlock(line, VizLyricsPanel));
         }
         _threeDHost.PushLyrics();
+        _wallpaperController.PushLyrics();
     }
 
     private TextBlock CreateLyricBlock(LyricLine line, Panel host)
@@ -2705,6 +2803,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
         _lastLyricIndex = current;
         if (!changed) return;
         _threeDHost.PushLyricIndex();
+        _wallpaperController.PushLyricIndex();
         if (current < _lyricBlocks.Count && LyricsPage.Visibility == Visibility.Visible)
             CenterActiveLyric(LyricsView, _lyricBlocks[current]);
         if (current < _cdLyricBlocks.Count && CdLyricsOverlay.Visibility == Visibility.Visible)
@@ -3563,6 +3662,41 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
         })));
         SettingsBody.Children.Add(Card("窗口", window));
 
+        // Desktop wallpaper (WebView2 3D scene rendered behind the desktop icons)
+        var wallpaper = new StackPanel();
+        wallpaper.Children.Add(Field("启用桌面壁纸", "把 3D 场景作为桌面壁纸，显示在桌面图标之后；鼠标穿透，不影响桌面右键与框选", Switch(_wallpaperEnabled, value => _ = SetWallpaperEnabledAsync(value))));
+        wallpaper.Children.Add(Field("鼠标交互", "3D 浮到桌面之上，可拖拽旋转 / 滚轮缩放；交互时图标被遮挡，按 Esc 返回壁纸", Switch(_wallpaperInteractive, value => _ = SetWallpaperInteractiveAsync(value))));
+        wallpaper.Children.Add(new TextBlock
+        {
+            Text = "外观（形态 / 粒子 / 背景 / 歌词 / 渲染质量）跟随「3D 模式」的设置。",
+            FontSize = 11.5,
+            Foreground = ResBrush("TextMutedBrush"),
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 6, 0, 2)
+        });
+        SettingsBody.Children.Add(Card("桌面壁纸", wallpaper));
+
+        // 3D mode: the appearance lives in the in-window 3D settings panel; offer a reset here too.
+        var threeDPanel = new StackPanel();
+        threeDPanel.Children.Add(new TextBlock
+        {
+            Text = "3D 模式的外观（形态 / 粒子 / 背景 / 歌词 / 质量）在 3D 窗口内的齿轮面板调整，改动会自动保存并在重启后恢复。",
+            FontSize = 11.5,
+            Foreground = ResBrush("TextMutedBrush"),
+            TextWrapping = TextWrapping.Wrap
+        });
+        var reset3d = new Button
+        {
+            Content = "恢复默认配置",
+            Style = (Style)FindResource("GhostButton"),
+            Padding = new Thickness(14, 8, 14, 8),
+            HorizontalAlignment = HorizontalAlignment.Left,
+            Margin = new Thickness(0, 10, 0, 0)
+        };
+        reset3d.Click += (_, _) => { ResetThreeDSettings(); BuildSettings("appearance"); };
+        threeDPanel.Children.Add(reset3d);
+        SettingsBody.Children.Add(Card("3D 模式", threeDPanel));
+
         // Visualizer settings
         var vizPanel = new StackPanel();
         var renderers = _visualizerEngine.AllRenderers;
@@ -4045,6 +4179,8 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
         public double ThreeDParticleCount { get; set; } = 1.0;
         public int ThreeDParticleColorMode { get; set; } = 1;
         public string ThreeDParticleColor { get; set; } = "";
+        public bool WallpaperEnabled { get; set; }
+        public bool WallpaperInteractive { get; set; }
     }
 
     public sealed class SongRow

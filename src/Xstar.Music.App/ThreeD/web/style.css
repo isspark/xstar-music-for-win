@@ -290,6 +290,17 @@ html, body {
   background: transparent; color: rgba(248, 250, 252, 0.75); font-family: inherit; font-size: 11px; cursor: pointer;
 }
 #settings-panel .bg-actions button:hover { background: rgba(255, 255, 255, 0.1); }
+#settings-panel #btn-reset3d {
+  height: 30px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(248, 250, 252, 0.8);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+#settings-panel #btn-reset3d:hover { background: rgba(255, 255, 255, 0.12); }
 
 #hud {
   position: fixed;
@@ -315,4 +326,16 @@ html, body {
 #resize-edges .rz.ne { top: 0; right: 0; width: 8px; height: 8px; cursor: nesw-resize; }
 #resize-edges .rz.sw { bottom: 0; left: 0; width: 8px; height: 8px; cursor: nesw-resize; }
 #resize-edges .rz.se { bottom: 0; right: 0; width: 8px; height: 8px; cursor: nwse-resize; }
+
+/* ---------------- wallpaper mode (embedded as desktop wallpaper) ---------------- */
+
+/* Only the scene and the 3D lyrics remain; every self-drawn UI is hidden. */
+body.wallpaper #titlebar,
+body.wallpaper #now-playing,
+body.wallpaper #transport,
+body.wallpaper #settings-panel,
+body.wallpaper #hud,
+body.wallpaper #resize-edges {
+  display: none !important;
+}
 

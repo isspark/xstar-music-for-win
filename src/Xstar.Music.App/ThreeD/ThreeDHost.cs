@@ -34,6 +34,7 @@ public interface IThreeDActions
     void ThreeDPickBackgroundImage();
     void ThreeDClearBackgroundImage();
     void ThreeDOnSetting(string key, JsonElement? value);
+    void ThreeDResetSettings();
 }
 
 /// <summary>
@@ -50,16 +51,28 @@ public sealed class ThreeDHost : IDisposable
     private readonly IThreeDActions _actions;
     private readonly AudioFeaturePump _pump;
     private readonly DispatcherTimer _timer;
+    private readonly string? _userDataFolder;
+    private readonly string _homeUrl;
+    private readonly Func<string>? _settingsProvider;
     private CoreWebView2? _core;
     private Task? _initTask;
     private DateTime _lastTick = DateTime.Now;
     private int _ticksSinceState;
 
-    public ThreeDHost(WebView2 view, IPlayerEngine player, IThreeDActions actions)
+    public ThreeDHost(
+        WebView2 view,
+        IPlayerEngine player,
+        IThreeDActions actions,
+        string? userDataFolder = null,
+        string? homeUrl = null,
+        Func<string>? settingsProvider = null)
     {
         _view = view;
         _player = player;
         _actions = actions;
+        _userDataFolder = userDataFolder;
+        _homeUrl = homeUrl ?? HomeUrl;
+        _settingsProvider = settingsProvider;
         _pump = new AudioFeaturePump(player);
         _timer = new DispatcherTimer(DispatcherPriority.Render) { Interval = TimeSpan.FromMilliseconds(33) };
         _timer.Tick += OnTick;
@@ -173,7 +186,7 @@ public sealed class ThreeDHost : IDisposable
     public void PushSettings()
     {
         if (_core is null) return;
-        try { _core.PostWebMessageAsJson(_actions.ThreeDGetSettingsJson()); }
+        try { _core.PostWebMessageAsJson(_settingsProvider?.Invoke() ?? _actions.ThreeDGetSettingsJson()); }
         catch { /* view torn down */ }
     }
 
@@ -185,7 +198,7 @@ public sealed class ThreeDHost : IDisposable
             return;
         }
 
-        var userData = Path.Combine(
+        var userData = _userDataFolder ?? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "XstarMusic", "WebView2");
         Directory.CreateDirectory(userData);
@@ -209,7 +222,7 @@ public sealed class ThreeDHost : IDisposable
             throw new DirectoryNotFoundException($"3D web assets not found: {webRoot}");
 
         core.SetVirtualHostNameToFolderMapping(VirtualHost, webRoot, CoreWebView2HostResourceAccessKind.Allow);
-        core.Navigate(HomeUrl);
+        core.Navigate(_homeUrl);
         IsReady = true;
     }
 
@@ -269,6 +282,7 @@ public sealed class ThreeDHost : IDisposable
             case "setSetting": _actions.ThreeDOnSetting(message.Key ?? "", message.Value); break;
             case "pickBackgroundImage": _actions.ThreeDPickBackgroundImage(); break;
             case "clearBackgroundImage": _actions.ThreeDClearBackgroundImage(); break;
+            case "resetSettings": _actions.ThreeDResetSettings(); break;
             case "clientError": LogClientError(message.Message); break;
         }
     }

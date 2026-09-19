@@ -9,8 +9,8 @@ import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
 
 export const QUALITY = {
   eco: { grid: 112, dpr: 0.85, bloom: false, stars: 700, bloomStrength: 0.0 },
-  balanced: { grid: 160, dpr: 1.15, bloom: true, stars: 1400, bloomStrength: 0.8 },
-  high: { grid: 200, dpr: 1.5, bloom: true, stars: 2400, bloomStrength: 1.0 },
+  balanced: { grid: 160, dpr: 1.15, bloom: true, stars: 1400, bloomStrength: 0.7 },
+  high: { grid: 200, dpr: 1.5, bloom: true, stars: 2400, bloomStrength: 0.9 },
 };
 
 const DEFAULT_BG = "#05060a";
@@ -26,6 +26,11 @@ export function createStage(canvas, tierName) {
   });
   renderer.setClearColor(DEFAULT_BG, 1);
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, tier.dpr));
+  // Filmic tone mapping rolls highlights off smoothly instead of clipping them to pure white —
+  // without it the cover's bright areas blown out by the particle shader + bloom turn into
+  // solid white blobs. OutputPass applies this on the way to sRGB.
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.3;
 
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 300);
@@ -35,8 +40,9 @@ export function createStage(canvas, tierName) {
   const mainPass = new RenderPass(scene, camera);
   composer.addPass(mainPass);
 
-  // Smaller radius keeps the particle field crisp instead of smearing it into a blur.
-  const bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), tier.bloomStrength, 0.32, 0.6);
+  // Smaller radius keeps the particle field crisp instead of smearing it into a blur; a high
+  // threshold means only genuinely bright pixels bloom, so a bright cover no longer washes out.
+  const bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), tier.bloomStrength, 0.32, 1.0);
   bloom.enabled = tier.bloom;
   composer.addPass(bloom);
 
