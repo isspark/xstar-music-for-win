@@ -1,0 +1,723 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>烟花可视化 · 圆形原型</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; height: 100%; overflow: hidden;
+    background: #04040a;
+    font-family: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
+    color: #e9ecf2;
+  }
+  #stage { display: block; width: 100vw; height: 100vh; }
+  #hud {
+    position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 14px;
+    padding: 8px 14px; border-radius: 999px;
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.10);
+    backdrop-filter: blur(10px);
+    font-size: 12.5px; letter-spacing: .2px; user-select: none;
+    opacity: .92;
+  }
+  #hud .hint { opacity: .65; }
+  #hud button {
+    all: unset; cursor: pointer;
+    padding: 5px 12px; border-radius: 999px;
+    background: rgba(255,255,255,0.10);
+    border: 1px solid rgba(255,255,255,0.14);
+    transition: background .15s ease;
+  }
+  #hud button:hover { background: rgba(255,255,255,0.18); }
+  #hud .dot { width: 7px; height: 7px; border-radius: 50%; background: #6e8bff; box-shadow: 0 0 8px #6e8bff; }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<div id="hud">
+  <span class="dot"></span>
+  <button id="micBtn">模拟节拍</button>
+  <span id="meter">♪</span>
+  <span class="hint">点击 / 按住拖动爆炸 · 空格引爆</span>
+</div>
+<script>
+(() => {
+  'use strict';
+
+  const canvas = document.getElementById('stage');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  const micBtn = document.getElementById('micBtn');
+  const meter = document.getElementById('meter');
+
+  const BG = 'rgba(4,4,10,0.20)';   // per-frame trail fade
+  const MAX_SPARKS = 6000;
+  const GRAVITY = 78;               // px / s^2
+  const ACCENT = 212;               // base hue; mirrors the app's theme accent
+
+  let W = 0, H = 0, DPR = 1;
+  let cx = 0, cy = 0, R = 0;
+
+  // ---------- audio state ----------
+  const A = { bass: 0, mid: 0, treble: 0, level: 0, beat: false };
+  let simulated = true;
+  let analyser = null, micStream = null, freq = null;
+  let bassEma = 0, lastBeat = 0, lastBeatCounter = -1;
+  let clockNow = 0;
+
+  // ---------- particle pools ----------
+  const sparks = [];
+  const flashes = [];
+  const micro = [];   // crackle children
+  const pending = []; // delayed sub-bursts (multi-break)
+
+  // ============================================================
+  // layout
+  // ============================================================
+  function resize() {
+    DPR = Math.min(2, window.devicePixelRatio || 1);
+    W = window.innerWidth;
+    H = window.innerHeight;
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    cx = W / 2;
+    cy = H / 2;
+    R = Math.min(W, H) * 0.5;
+    ctx.fillStyle = '#04040a';
+    ctx.fillRect(0, 0, W, H);
+  }
+  window.addEventListener('resize', resize);
+
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const clamp01 = v => v < 0 ? 0 : v > 1 ? 1 : v;
+
+  function burstHue() {
+    // mostly near the accent, occasionally a complementary accent for variety
+    const palette = [ACCENT, ACCENT + 150, 45, 330, 168, 275];
+    const h = palette[(Math.random() * palette.length) | 0];
+    return (h + rand(-18, 18) + 360) % 360;
+  }
+
+  // ============================================================
+  // audio model  (simulated rhythm, or real mic when enabled)
+  // ============================================================
+  function updateAudio(now) {
+    clockNow = now;
+    if (analyser && freq) {
+      analyser.getByteFrequencyData(freq);
+      const n = freq.length;
+      let b = 0, m = 0, t = 0, bc = 0, mc = 0, tc = 0;
+      for (let i = 0; i < n; i++) {
+        const v = freq[i] / 255;
+        if (i < n * 0.10) { b += v; bc++; }
+        else if (i < n * 0.55) { m += v; mc++; }
+        else { t += v; tc++; }
+      }
+      A.bass = bc ? b / bc : 0;
+      A.mid = mc ? m / mc : 0;
+      A.treble = tc ? t / tc : 0;
+      bassEma = bassEma * 0.90 + A.bass * 0.10;
+      A.beat = A.bass > bassEma * 1.55 && A.bass > 0.34 && now - lastBeat > 0.18;
+      if (A.beat) lastBeat = now;
+    } else {
+      const interval = 60 / 124;               // 124 BPM
+      const phase = (now % interval) / interval;
+      const env = Math.pow(1 - phase, 2.4);
+      const bar = Math.floor(now / (interval * 4));
+      const variation = 0.68 + 0.32 * Math.sin(bar * 1.7);
+      A.bass = 0.20 + 0.80 * env * variation;
+      A.mid = 0.34 + 0.30 * (0.5 + 0.5 * Math.sin(now * 2.1)) + 0.12 * Math.sin(now * 5.3);
+      A.treble = 0.20 + 0.30 * Math.abs(Math.sin(now * 7.3 + 1.3)) + 0.12 * Math.random();
+      const counter = Math.floor(now / interval);
+      A.beat = counter !== lastBeatCounter;
+      if (A.beat) lastBeatCounter = counter;
+    }
+    A.bass = clamp01(A.bass); A.mid = clamp01(A.mid); A.treble = clamp01(A.treble);
+    A.level = clamp01(0.5 * A.bass + 0.35 * A.mid + 0.15 * A.treble);
+  }
+
+  // ============================================================
+  // emitters
+  // ============================================================
+  function explodeAtRandom() {
+    explode(rand(0.12, 0.88) * W, rand(0.12, 0.80) * H, burstHue());
+  }
+
+  // Distinct shell types so every burst looks different instead of one generic sphere.
+  const SHELLS = [
+    { id: 'peony',         w: 3.0 },  // 牡丹：经典球形辐射
+    { id: 'ring',          w: 2.0 },  // 环形：平面光环
+    { id: 'doubleRing',    w: 1.6 },  // 双环：内外双色
+    { id: 'willow',        w: 2.2 },  // 垂柳：金色下垂长拖尾
+    { id: 'chrysanthemum', w: 2.0 },  // 菊花：球形 + 长拖尾爆闪
+    { id: 'palm',          w: 1.4 },  // 棕榈：粗壮少股、末端碎裂
+    { id: 'crossette',     w: 1.5 },  // 裂变：飞行中途十字分裂
+    { id: 'strobe',        w: 1.5 },  // 闪烁：断续频闪
+    { id: 'pistil',        w: 1.6 },  // 双层芯：外环 + 亮白芯
+    { id: 'crackle',       w: 1.3 },  // 爆裂：密集高频碎闪
+    { id: 'heart',         w: 1.2 },  // 爱心：参数曲线心形
+    { id: 'star',          w: 1.2 },  // 五角星：折线星形
+    { id: 'spiral',        w: 1.3 },  // 螺旋：旋臂发散
+    { id: 'multiBreak',    w: 1.1 },  // 多重开花：延迟子爆
+    { id: 'saturn',        w: 1.3 },  // 土星：球体 + 斜光环
+    { id: 'peacock',       w: 1.2 },  // 孔雀：上方彩虹扇形
+    { id: 'comet',         w: 1.2 },  // 彗星：定向高速长尾
+    { id: 'dahlia',        w: 1.1 },  // 大丽花：大而稀疏的长尾
+    { id: 'wave',          w: 1.2 },  // 波浪：花瓣状速度调制
+    { id: 'butterfly',     w: 1.1 },  // 蝴蝶：左右对称双瓣
+    { id: 'brocade',       w: 1.2 },  // 锦冠：金色密集下垂
+    { id: 'triRing',       w: 1.2 },  // 三环：同心多色环
+  ];
+
+  function pickShell() {
+    let total = 0;
+    for (const s of SHELLS) total += s.w;
+    let r = Math.random() * total;
+    for (const s of SHELLS) { r -= s.w; if (r <= 0) return s.id; }
+    return 'peony';
+  }
+
+  function addSpark(o) {
+    if (sparks.length >= MAX_SPARKS) return;
+    sparks.push(Object.assign({
+      x: 0, y: 0, vx: 0, vy: 0,
+      life: 0, maxLife: 1.2,
+      hue: 0, sat: 95, light: 70,
+      size: 1.4, drag: 0.93, grav: 1, tail: 1,
+      kind: 'normal', blink: 0, splitAt: 0, splitCount: 0,
+      crackle: false,
+    }, o));
+  }
+
+  let burstScale = 1;   // per-burst size factor, set inside explode()
+
+  // Emit a single radial spark from (x, y) at the given angle / speed.
+  function radial(x, y, ang, sp, hue, extra) {
+    const o = Object.assign({
+      x, y,
+      vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp,
+      hue: (hue + rand(-26, 26) + 360) % 360,
+      sat: rand(82, 100), light: rand(56, 82),
+      size: rand(0.9, 2.2),
+      drag: rand(0.86, 0.955),
+      maxLife: rand(0.9, 1.8),
+      crackle: Math.random() < A.treble * 0.18,
+    }, extra || {});
+    o.size = Math.min(8, o.size * burstScale);
+    addSpark(o);
+  }
+
+  function explode(x, y, hue, opts) {
+    opts = opts || {};
+    const type = opts.type || pickShell();
+    // Vary the size / footprint of each burst: tiny pops up to huge brocades.
+    let scale = opts.scale != null ? opts.scale : rand(0.35, 2.2);
+    if (opts.scale == null && Math.random() < 0.10) scale *= rand(1.3, 1.6); // occasional monster
+    burstScale = scale;
+    const count = Math.min(880, ((105 + A.mid * 180 + A.level * 150) * scale) | 0);
+    const speed = (95 + A.bass * 235) * Math.pow(scale, 0.8);
+    const n = Math.min(count, Math.max(0, MAX_SPARKS - sparks.length));
+
+    switch (type) {
+      case 'ring':
+        for (let i = 0; i < n; i++) radial(x, y, (i / n) * Math.PI * 2, speed * rand(0.9, 1.04), hue, { tail: 1.8 });
+        break;
+
+      case 'doubleRing': {
+        const inner = (n * 0.55) | 0, outer = n - inner;
+        for (let i = 0; i < outer; i++) radial(x, y, (i / outer) * Math.PI * 2, speed * rand(0.92, 1.05), hue, { tail: 1.8 });
+        for (let i = 0; i < inner; i++) radial(x, y, (i / inner) * Math.PI * 2 + 0.1, speed * rand(0.45, 0.6), (hue + 150) % 360, { tail: 1.4, light: rand(70, 92) });
+        break;
+      }
+
+      case 'willow': {
+        const gold = (hue * 0.25 + 38) % 360;   // pull toward warm gold
+        const c = Math.max(18, Math.min(n, (n * 0.6) | 0));
+        for (let i = 0; i < c; i++) radial(x, y, Math.random() * Math.PI * 2, speed * rand(0.28, 0.55), gold,
+          { maxLife: rand(1.8, 3.0), drag: rand(0.965, 0.978), grav: 1.7, tail: 6, size: rand(1.1, 2.0), light: rand(62, 80) });
+        break;
+      }
+
+      case 'chrysanthemum':
+        for (let i = 0; i < n; i++) radial(x, y, Math.random() * Math.PI * 2, speed * Math.pow(Math.random(), 0.5), hue,
+          { tail: 3, maxLife: rand(1.1, 2.2), crackle: Math.random() < 0.35 });
+        break;
+
+      case 'palm': {
+        const strands = 12 + ((Math.random() * 10) | 0);
+        for (let i = 0; i < strands; i++) radial(x, y, (i / strands) * Math.PI * 2 + rand(-0.1, 0.1), speed * rand(0.7, 1.0), hue,
+          { size: rand(2.6, 4.2), tail: 5, grav: 1.4, drag: rand(0.94, 0.965), maxLife: rand(1.5, 2.4),
+            kind: 'frag', splitAt: rand(0.4, 0.68), splitCount: 3 });
+        break;
+      }
+
+      case 'crossette':
+        for (let i = 0; i < n; i++) radial(x, y, Math.random() * Math.PI * 2, speed * Math.pow(Math.random(), 0.5), hue,
+          { size: rand(1.4, 2.4), tail: 2, maxLife: rand(0.9, 1.4),
+            kind: 'cross', splitAt: rand(0.35, 0.6), splitCount: 4 });
+        break;
+
+      case 'strobe':
+        for (let i = 0; i < n; i++) radial(x, y, Math.random() * Math.PI * 2, speed * rand(0.35, 0.7), hue,
+          { kind: 'strobe', blink: rand(16, 34), maxLife: rand(1.4, 2.6), size: rand(1.2, 2.0), drag: rand(0.93, 0.96) });
+        break;
+
+      case 'pistil': {
+        const core = (n * 0.4) | 0, out = n - core;
+        for (let i = 0; i < out; i++) radial(x, y, Math.random() * Math.PI * 2, speed * Math.pow(Math.random(), 0.5), hue, { tail: 2 });
+        for (let i = 0; i < core; i++) radial(x, y, Math.random() * Math.PI * 2, speed * rand(0.35, 0.6), hue,
+          { tail: 1.6, light: rand(88, 100), sat: rand(10, 40), size: rand(1.6, 2.6) });
+        break;
+      }
+
+      case 'crackle':
+        for (let i = 0; i < n; i++) radial(x, y, Math.random() * Math.PI * 2, speed * Math.pow(Math.random(), 0.6), hue,
+          { crackle: true, maxLife: rand(0.9, 1.7), size: rand(1.0, 2.0) });
+        break;
+
+      case 'heart': {
+        const c = Math.min(n, 340);
+        for (let i = 0; i < c; i++) {
+          const tt = (i / c) * Math.PI * 2;
+          const hx = 16 * Math.pow(Math.sin(tt), 3);
+          const hy = -(13 * Math.cos(tt) - 5 * Math.cos(2 * tt) - 2 * Math.cos(3 * tt) - Math.cos(4 * tt));
+          const mag = Math.hypot(hx, hy) / 17;
+          radial(x, y, Math.atan2(hy, hx), speed * mag, hue, { tail: 1.8, maxLife: rand(1.0, 1.9) });
+        }
+        break;
+      }
+
+      case 'star': {
+        const points = 5;
+        const segs = points * 2;
+        const verts = [];
+        for (let k = 0; k < segs; k++) {
+          const a = -Math.PI / 2 + k * Math.PI / points;
+          verts.push({ x: Math.cos(a) * (k % 2 === 0 ? 1 : 0.42), y: Math.sin(a) * (k % 2 === 0 ? 1 : 0.42) });
+        }
+        const c = Math.min(n, 360);
+        for (let i = 0; i < c; i++) {
+          const f = (i / c) * segs;
+          const s0 = Math.floor(f) % segs, s1 = (s0 + 1) % segs, ft = f - Math.floor(f);
+          const px = verts[s0].x + (verts[s1].x - verts[s0].x) * ft;
+          const py = verts[s0].y + (verts[s1].y - verts[s0].y) * ft;
+          radial(x, y, Math.atan2(py, px), speed * Math.hypot(px, py), hue, { tail: 1.6, maxLife: rand(0.9, 1.7) });
+        }
+        break;
+      }
+
+      case 'spiral': {
+        const arms = 3;
+        const c = Math.min(n, 380);
+        for (let i = 0; i < c; i++) {
+          const tt = i / c;
+          const ang = tt * Math.PI * 3.4 + (i % arms) * (Math.PI * 2 / arms);
+          radial(x, y, ang, speed * (0.25 + tt * 0.85), hue + (i % arms) * 40,
+            { tail: 3, maxLife: rand(1.0, 2.0) });
+        }
+        break;
+      }
+
+      case 'multiBreak': {
+        const sub = 3 + ((Math.random() * 3) | 0);
+        const types = ['peony', 'ring', 'strobe', 'crackle', 'pistil', 'chrysanthemum'];
+        for (let i = 0; i < sub; i++) {
+          const a = Math.random() * Math.PI * 2;
+          const d = R * rand(0.12, 0.32) * scale;
+          pending.push({
+            at: clockNow + rand(0.10, 0.45),
+            x: x + Math.cos(a) * d,
+            y: y + Math.sin(a) * d,
+            hue: (hue + rand(-40, 40) + 360) % 360,
+            scale: scale * rand(0.4, 0.65),
+            type: types[(Math.random() * types.length) | 0],
+          });
+        }
+        break;
+      }
+
+      case 'saturn': {
+        const c = Math.min(n, 320);
+        const coreN = (c * 0.6) | 0;
+        for (let i = 0; i < coreN; i++) radial(x, y, Math.random() * Math.PI * 2, speed * Math.pow(Math.random(), 0.5), hue, { tail: 1.5 });
+        const ringN = c - coreN;
+        const tilt = rand(-0.5, 0.5), ct = Math.cos(tilt), st = Math.sin(tilt);
+        for (let i = 0; i < ringN; i++) {
+          const a = (i / ringN) * Math.PI * 2;
+          const sp = speed * rand(0.95, 1.06);
+          const ex = Math.cos(a) * sp, ey = Math.sin(a) * sp * 0.22;
+          addSpark({
+            x, y, vx: ex * ct - ey * st, vy: ex * st + ey * ct,
+            hue: (hue + 155 + rand(-15, 15) + 360) % 360, sat: rand(85, 100), light: rand(70, 90),
+            size: rand(1.1, 2.0), drag: rand(0.9, 0.95), maxLife: rand(1.1, 1.9), tail: 2.5,
+            crackle: Math.random() < A.treble * 0.2,
+          });
+        }
+        break;
+      }
+
+      case 'peacock': {
+        const c = Math.min(n, 340);
+        for (let i = 0; i < c; i++) {
+          const f = i / c;
+          const ang = -Math.PI * 0.85 + f * Math.PI * 0.7;
+          const sp = speed * (0.5 + 0.5 * Math.abs(Math.sin(f * Math.PI * 3)));
+          radial(x, y, ang, sp, hue + f * 70, { tail: 3, maxLife: rand(1.0, 1.9) });
+        }
+        break;
+      }
+
+      case 'comet': {
+        const dir = rand(-Math.PI, 0);
+        const c = Math.min(n, 260);
+        for (let i = 0; i < c; i++) {
+          const f = i / c;
+          radial(x, y, dir + rand(-0.06, 0.06), speed * (1 - f * 0.65) + 12, hue,
+            { tail: 5, size: rand(1.0, 2.2), maxLife: rand(1.2, 2.1) });
+        }
+        break;
+      }
+
+      case 'dahlia': {
+        const c = Math.max(36, Math.min(n, 150));
+        for (let i = 0; i < c; i++) radial(x, y, Math.random() * Math.PI * 2, speed * rand(0.6, 1.0), hue,
+          { tail: 5, size: rand(1.6, 3.0), maxLife: rand(1.4, 2.4) });
+        break;
+      }
+
+      case 'wave': {
+        const c = Math.min(n, 380);
+        for (let i = 0; i < c; i++) {
+          const a = (i / c) * Math.PI * 2;
+          const sp = speed * (0.45 + 0.55 * Math.abs(Math.cos(a * 2.5)));
+          radial(x, y, a, sp, hue, { tail: 2 });
+        }
+        break;
+      }
+
+      case 'butterfly': {
+        const c = Math.min(n, 340);
+        const off = speed * 0.32;
+        for (let i = 0; i < c; i++) {
+          const side = (i & 1) ? 1 : -1;
+          const a = Math.random() * Math.PI * 2;
+          const sp = speed * rand(0.25, 0.55);
+          addSpark({
+            x, y, vx: Math.cos(a) * sp + side * off, vy: Math.sin(a) * sp * 0.7,
+            hue: (hue + rand(-20, 20) + 360) % 360, sat: rand(85, 100), light: rand(60, 85),
+            size: rand(1.0, 2.0), drag: rand(0.9, 0.95), maxLife: rand(1.1, 2.0), tail: 2.2,
+            crackle: Math.random() < A.treble * 0.2,
+          });
+        }
+        break;
+      }
+
+      case 'brocade': {
+        const gold = (hue * 0.3 + 42) % 360;
+        const c = Math.min(n, 520);
+        for (let i = 0; i < c; i++) radial(x, y, Math.random() * Math.PI * 2, speed * Math.pow(Math.random(), 0.5), gold,
+          { tail: 4, size: rand(1.2, 2.4), drag: rand(0.95, 0.972), grav: 1.35, maxLife: rand(1.4, 2.5), crackle: Math.random() < 0.5 });
+        break;
+      }
+
+      case 'triRing': {
+        const rings = [
+          { r: 1.0, h: hue },
+          { r: 0.72, h: (hue + 120) % 360 },
+          { r: 0.45, h: (hue + 240) % 360 },
+        ];
+        for (const ring of rings) {
+          const c = Math.max(24, (n / 3) | 0);
+          for (let i = 0; i < c; i++) radial(x, y, (i / c) * Math.PI * 2, speed * ring.r * rand(0.97, 1.03), ring.h, { tail: 1.8 });
+        }
+        break;
+      }
+
+      default: // peony
+        for (let i = 0; i < n; i++) radial(x, y, Math.random() * Math.PI * 2, speed * Math.pow(Math.random(), 0.55), hue);
+    }
+
+    flashes.push({
+      x, y, life: 0, maxLife: rand(0.24, 0.34),
+      hue, radius: R * (0.08 + Math.random() * 0.05) + A.bass * R * 0.12,
+    });
+  }
+
+  function spawnCrackle(s) {
+    if (sparks.length + micro.length >= MAX_SPARKS) return;
+    const n = 1 + (Math.random() < 0.5 ? 1 : 0);
+    for (let i = 0; i < n; i++) {
+      const ang = Math.random() * Math.PI * 2;
+      const sp = rand(25, 80);
+      micro.push({
+        x: s.x, y: s.y, px: s.x, py: s.y,
+        vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp,
+        life: 0, maxLife: rand(0.18, 0.4),
+        hue: s.hue, sat: s.sat, light: 88, size: 0.8,
+      });
+    }
+  }
+
+  // ============================================================
+  // simulation
+  // ============================================================
+  function updateSparks(dt, now) {
+    for (let i = sparks.length - 1; i >= 0; i--) {
+      const s = sparks[i];
+      s.life += dt;
+
+      // fragment / crossette shells split into children mid-flight
+      if (s.splitAt && s.life >= s.maxLife * s.splitAt) {
+        const base = Math.hypot(s.vx, s.vy);
+        const ang0 = Math.atan2(s.vy, s.vx);
+        const k = s.splitCount || 4;
+        const spread = s.kind === 'cross' ? 0.72 : 0.55;
+        const childTail = s.tail * 0.6;
+        for (let j = 0; j < k; j++) {
+          const a = ang0 + j * (Math.PI * 2 / k);
+          addSpark({
+            x: s.x, y: s.y,
+            vx: Math.cos(a) * base * spread, vy: Math.sin(a) * base * spread,
+            life: 0, maxLife: rand(0.4, 0.9),
+            hue: s.hue, sat: s.sat, light: Math.min(96, s.light + 12),
+            size: s.size * 0.75, drag: s.drag, grav: s.grav, tail: childTail,
+            crackle: Math.random() < A.treble * 0.3,
+          });
+        }
+        sparks.splice(i, 1);
+        continue;
+      }
+
+      if (s.life >= s.maxLife) { sparks.splice(i, 1); continue; }
+
+      const drag = Math.pow(s.drag, dt * 60);
+      s.vx *= drag;
+      s.vy = s.vy * drag + GRAVITY * s.grav * dt;
+      s.x += s.vx * dt;
+      s.y += s.vy * dt;
+      if (s.x < -60 || s.x > W + 60 || s.y < -60 || s.y > H + 60) { sparks.splice(i, 1); continue; }
+      if (s.crackle && s.life > s.maxLife * 0.55 && Math.random() < A.treble * 0.5) spawnCrackle(s);
+    }
+    for (let i = micro.length - 1; i >= 0; i--) {
+      const s = micro[i];
+      s.life += dt;
+      if (s.life >= s.maxLife) { micro.splice(i, 1); continue; }
+      s.px = s.x; s.py = s.y;
+      s.vx *= Math.pow(0.9, dt * 60);
+      s.vy = s.vy * Math.pow(0.9, dt * 60) + GRAVITY * dt;
+      s.x += s.vx * dt; s.y += s.vy * dt;
+    }
+    for (let i = flashes.length - 1; i >= 0; i--) {
+      flashes[i].life += dt;
+      if (flashes[i].life >= flashes[i].maxLife) flashes.splice(i, 1);
+    }
+  }
+
+  let nextBurst = 0;
+  let lastBarrage = -99;
+
+  // Intense passages fire a rolling barrage that sweeps left → right along a line
+  // (or within a horizontal band).
+  function startBarrage() {
+    const line = Math.random() < 0.5;
+    const count = 5 + ((Math.random() * 5) | 0);
+    const stepTime = rand(0.05, 0.11);
+    const x0 = rand(0.05, 0.16) * W;
+    const x1 = rand(0.84, 0.95) * W;
+    const yBase = rand(0.18, 0.68) * H;
+    const bandH = line ? 0 : rand(0.12, 0.38) * H;
+    for (let i = 0; i < count; i++) {
+      const f = count > 1 ? i / (count - 1) : 0;
+      pending.push({
+        at: clockNow + i * stepTime,
+        x: x0 + (x1 - x0) * f,
+        y: line ? yBase : yBase + rand(-0.5, 0.5) * bandH,
+        hue: burstHue(),
+        scale: rand(0.5, 1.3),
+        type: pickShell(),
+      });
+    }
+  }
+
+  function updateSpawner(now) {
+    for (let i = pending.length - 1; i >= 0; i--) {
+      if (now >= pending[i].at) {
+        const p = pending.splice(i, 1)[0];
+        explode(p.x, p.y, p.hue, { scale: p.scale, type: p.type });
+      }
+    }
+    if (A.beat) {
+      explodeAtRandom();
+      if (A.level > 0.6 && Math.random() < 0.5) explodeAtRandom();
+    }
+    // rolling chain bursts during intense, fast passages
+    if (now - lastBarrage > 3.0 &&
+        ((A.beat && A.level > 0.55 && Math.random() < 0.45) || (A.level > 0.78 && Math.random() < 0.15))) {
+      lastBarrage = now;
+      startBarrage();
+    }
+    if (now >= nextBurst) {
+      if (!A.beat) explodeAtRandom();
+      nextBurst = now + (1.05 - 0.6 * A.level) * rand(0.8, 1.4);
+    }
+  }
+
+  // ============================================================
+  // rendering
+  // ============================================================
+  function render(dt, now) {
+    // trail fade across the whole window
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = BG;
+    ctx.fillRect(0, 0, W, H);
+
+    // subtle themed backdrop glow
+    ctx.globalCompositeOperation = 'lighter';
+    const glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.hypot(W, H) * 0.6);
+    glow.addColorStop(0, `hsla(${ACCENT + 30}, 70%, 45%, ${0.05 + A.bass * 0.06})`);
+    glow.addColorStop(0.6, 'hsla(230, 80%, 40%, 0.015)');
+    glow.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = glow;
+    ctx.fillRect(0, 0, W, H);
+
+    // explosion flashes
+    for (const f of flashes) {
+      const t = f.life / f.maxLife;
+      const a = (1 - t) * (1 - t);
+      const g = ctx.createRadialGradient(f.x, f.y, 0, f.x, f.y, f.radius * (0.6 + t * 1.6));
+      g.addColorStop(0, `hsla(${f.hue}, 100%, 92%, ${a * 0.9})`);
+      g.addColorStop(0.35, `hsla(${f.hue}, 100%, 65%, ${a * 0.35})`);
+      g.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = g;
+      ctx.fillRect(f.x - f.radius * 3, f.y - f.radius * 3, f.radius * 6, f.radius * 6);
+    }
+
+    // sparks
+    ctx.lineCap = 'round';
+    for (const s of sparks) {
+      const t = s.life / s.maxLife;
+      let a = (1 - t) * (0.75 + 0.25 * Math.sin(s.life * 40 + s.hue));
+      if (s.kind === 'strobe') a *= Math.sin(s.life * s.blink) > 0 ? 1 : 0.12;
+      a = clamp01(a);
+      const lw = s.size * (1 - t * 0.45);
+      const tailK = Math.max(1, s.tail);
+      const tx = s.x - s.vx * dt * tailK;
+      const ty = s.y - s.vy * dt * tailK;
+      ctx.strokeStyle = `hsla(${s.hue}, ${s.sat}%, ${s.light}%, ${a})`;
+      ctx.lineWidth = lw;
+      ctx.beginPath();
+      ctx.moveTo(tx, ty);
+      ctx.lineTo(s.x, s.y);
+      ctx.stroke();
+      if (s.size > 1.7) {
+        ctx.fillStyle = `hsla(${s.hue}, ${s.sat}%, ${Math.min(96, s.light + 18)}%, ${a})`;
+        ctx.beginPath(); ctx.arc(s.x, s.y, lw * 0.7, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+
+    // crackle micro-sparks
+    for (const s of micro) {
+      const t = s.life / s.maxLife;
+      ctx.strokeStyle = `hsla(${s.hue}, 100%, 92%, ${1 - t})`;
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(s.px, s.py); ctx.lineTo(s.x, s.y); ctx.stroke();
+    }
+  }
+
+  // ============================================================
+  // input
+  // ============================================================
+  const TRAIL_SHELLS = ['peony', 'ring', 'crackle', 'strobe', 'wave', 'pistil', 'saturn'];
+  const TRAIL_SPACING = 64;
+  let dragging = false, dragX = 0, dragY = 0;
+
+  canvas.addEventListener('pointerdown', e => {
+    dragging = true;
+    dragX = e.clientX;
+    dragY = e.clientY;
+    try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+    explode(dragX, dragY, burstHue(), { scale: rand(0.5, 1.0) });
+  });
+
+  // While the left button is held, drop a burst every few dozen pixels along the path.
+  canvas.addEventListener('pointermove', e => {
+    if (!dragging || (e.buttons & 1) === 0) return;
+    const dx = e.clientX - dragX;
+    const dy = e.clientY - dragY;
+    const dist = Math.hypot(dx, dy);
+    if (dist < TRAIL_SPACING) return;
+    const ux = dx / dist, uy = dy / dist;
+    let steps = Math.floor(dist / TRAIL_SPACING);
+    if (steps > 6) steps = 6;           // cap bursts per event to protect the pool
+    const s = dist / steps;
+    for (let i = 0; i < steps; i++) {
+      dragX += ux * s;
+      dragY += uy * s;
+      explode(dragX + rand(-8, 8), dragY + rand(-8, 8), burstHue(),
+        { scale: rand(0.45, 0.95), type: TRAIL_SHELLS[(Math.random() * TRAIL_SHELLS.length) | 0] });
+    }
+  });
+
+  const endDrag = () => { dragging = false; };
+  canvas.addEventListener('pointerup', endDrag);
+  canvas.addEventListener('pointercancel', endDrag);
+  window.addEventListener('pointerup', endDrag);
+
+  window.addEventListener('keydown', e => {
+    if (e.code === 'Space') { e.preventDefault(); explodeAtRandom(); }
+  });
+
+  micBtn.addEventListener('click', async () => {
+    if (analyser) {
+      try { micStream.getTracks().forEach(t => t.stop()); } catch (_) {}
+      micStream = null; analyser = null; freq = null;
+      simulated = true;
+      micBtn.textContent = '模拟节拍';
+      meter.textContent = '♪';
+      return;
+    }
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const actx = new (window.AudioContext || window.webkitAudioContext)();
+      const src = actx.createMediaStreamSource(micStream);
+      analyser = actx.createAnalyser();
+      analyser.fftSize = 1024;
+      analyser.smoothingTimeConstant = 0.75;
+      src.connect(analyser);
+      freq = new Uint8Array(analyser.frequencyBinCount);
+      simulated = false;
+      micBtn.textContent = '关闭麦克风';
+      meter.textContent = '🎙';
+    } catch (err) {
+      alert('无法访问麦克风：' + err.message + '\n（file:// 打开时浏览器通常禁用麦克风，请用本地服务器打开）');
+    }
+  });
+
+  // ============================================================
+  // main loop
+  // ============================================================
+  let last = 0;
+  function frame(ts) {
+    requestAnimationFrame(frame);
+    const now = ts / 1000;
+    let dt = now - last;
+    last = now;
+    if (dt <= 0 || dt > 0.05) dt = 1 / 30;
+
+    updateAudio(now);
+    updateSpawner(now);
+    updateSparks(dt, now);
+    render(dt, now);
+
+    // tiny readout
+    meter.title = `bass ${A.bass.toFixed(2)} · mid ${A.mid.toFixed(2)} · treble ${A.treble.toFixed(2)}`;
+  }
+
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

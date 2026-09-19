@@ -200,6 +200,187 @@ internal static class RendererUtils
         }
     }
 
+    /// <summary>
+    /// A vertex for <see cref="FillConvexPolyLocked"/>: position + flat RGB colour
+    /// (Gouraud-interpolated across scanlines).
+    /// </summary>
+    public readonly struct PolyVertex
+    {
+        public readonly int X, Y;
+        public readonly byte R, G, B;
+        public PolyVertex(int x, int y, byte r, byte g, byte b) { X = x; Y = y; R = r; G = g; B = b; }
+        public PolyVertex(int x, int y, Color c) { X = x; Y = y; R = c.R; G = c.G; B = c.B; }
+    }
+
+    /// <summary>
+    /// Fills a convex polygon (triangle fan / quad / ring wedge) with per-vertex colours
+    /// interpolated along each scanline. Overwrites pixels (opaque). Bitmap must be locked.
+    /// </summary>
+    public static unsafe void FillConvexPolyLocked(WriteableBitmap bmp, ReadOnlySpan<PolyVertex> verts)
+    {
+        int n = verts.Length;
+        if (n < 3) return;
+
+        int minY = int.MaxValue, maxY = int.MinValue;
+        for (int i = 0; i < n; i++)
+        {
+            if (verts[i].Y < minY) minY = verts[i].Y;
+            if (verts[i].Y > maxY) maxY = verts[i].Y;
+        }
+        minY = Math.Max(minY, 0);
+        maxY = Math.Min(maxY, bmp.PixelHeight - 1);
+        if (minY > maxY) return;
+
+        int bmpW = bmp.PixelWidth, stride = bmp.BackBufferStride;
+        byte* basePtr = (byte*)bmp.BackBuffer;
+
+        // A convex polygon has at most n intersections per scanline.
+        float* ix = stackalloc float[n];
+        float* ir = stackalloc float[n];
+        float* ig = stackalloc float[n];
+        float* ib = stackalloc float[n];
+
+        for (int y = minY; y <= maxY; y++)
+        {
+            int cnt = 0;
+            for (int e = 0; e < n; e++)
+            {
+                var a = verts[e];
+                var c = verts[(e + 1) % n];
+                if (a.Y == c.Y) continue;
+                // Half-open edge convention so shared edges are sampled once.
+                if (y < Math.Min(a.Y, c.Y) || y >= Math.Max(a.Y, c.Y)) continue;
+                float t = (y + 0.5f - a.Y) / (c.Y - a.Y);
+                ix[cnt] = a.X + t * (c.X - a.X);
+                ir[cnt] = a.R + t * (c.R - a.R);
+                ig[cnt] = a.G + t * (c.G - a.G);
+                ib[cnt] = a.B + t * (c.B - a.B);
+                cnt++;
+            }
+            if (cnt < 2) continue;
+
+            // Insertion sort by x (n is tiny).
+            for (int a = 1; a < cnt; a++)
+            {
+                float kx = ix[a], kr = ir[a], kg = ig[a], kb = ib[a];
+                int z = a - 1;
+                while (z >= 0 && ix[z] > kx)
+                {
+                    ix[z + 1] = ix[z]; ir[z + 1] = ir[z]; ig[z + 1] = ig[z]; ib[z + 1] = ib[z];
+                    z--;
+                }
+                ix[z + 1] = kx; ir[z + 1] = kr; ig[z + 1] = kg; ib[z + 1] = kb;
+            }
+
+            for (int p = 0; p + 1 < cnt; p += 2)
+            {
+                float xL = ix[p], xR = ix[p + 1];
+                int xs = Math.Max(0, (int)MathF.Ceiling(xL - 0.5f));
+                int xe = Math.Min(bmpW - 1, (int)MathF.Floor(xR - 0.5f));
+                if (xe < xs) continue;
+                float span = MathF.Max(1f, xR - xL);
+                byte* row = basePtr + y * stride + xs * 4;
+                for (int x = xs; x <= xe; x++, row += 4)
+                {
+                    float t = Math.Clamp((x + 0.5f - xL) / span, 0f, 1f);
+                    row[0] = (byte)(ib[p] + (ib[p + 1] - ib[p]) * t);
+                    row[1] = (byte)(ig[p] + (ig[p + 1] - ig[p]) * t);
+                    row[2] = (byte)(ir[p] + (ir[p + 1] - ir[p]) * t);
+                    row[3] = 255;
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Draws a 1px line with per-endpoint colours (opaque overwrite). Bitmap must be locked.
+    /// </summary>
+    public static unsafe void DrawLineLocked(WriteableBitmap bmp, int x0, int y0, Color c0, int x1, int y1, Color c1)
+    {
+        int steps = Math.Max(Math.Abs(x1 - x0), Math.Abs(y1 - y0));
+        if (steps == 0) { FillRectLocked(bmp, x0, y0, 1, 1, c0.R, c0.G, c0.B); return; }
+        for (int i = 0; i <= steps; i++)
+        {
+            float t = i / (float)steps;
+            int x = (int)Math.Round(x0 + (x1 - x0) * t);
+            int y = (int)Math.Round(y0 + (y1 - y0) * t);
+            byte r = (byte)(c0.R + (c1.R - c0.R) * t);
+            byte g = (byte)(c0.G + (c1.G - c0.G) * t);
+            byte bl = (byte)(c0.B + (c1.B - c0.B) * t);
+            FillRectLocked(bmp, x, y, 1, 1, r, g, bl);
+        }
+    }
+
+    /// <summary>
+    /// Draws a thin additive line with per-endpoint colours and a 1px soft edge (~3px wide),
+    /// so coloured strands read crisply without a large bloom. Bitmap must be locked.
+    /// </summary>
+    public static unsafe void DrawSoftLineAddLocked(WriteableBitmap bmp,
+        float x0, float y0, System.Windows.Media.Color c0,
+        float x1, float y1, System.Windows.Media.Color c1, float intensity)
+    {
+        if (intensity <= 0.004f) return;
+        int steps = (int)MathF.Ceiling(MathF.Max(MathF.Abs(x1 - x0), MathF.Abs(y1 - y0)));
+        if (steps <= 0)
+        {
+            int px = (int)MathF.Round(x0), py = (int)MathF.Round(y0);
+            AddScaledLocked(bmp, px, py, c0.R, c0.G, c0.B, intensity);
+            return;
+        }
+        float edge = intensity * 0.4f;
+        for (int i = 0; i <= steps; i++)
+        {
+            float t = i / (float)steps;
+            int x = (int)MathF.Round(x0 + (x1 - x0) * t);
+            int y = (int)MathF.Round(y0 + (y1 - y0) * t);
+            byte r = (byte)(c0.R + (c1.R - c0.R) * t);
+            byte g = (byte)(c0.G + (c1.G - c0.G) * t);
+            byte b = (byte)(c0.B + (c1.B - c0.B) * t);
+            AddScaledLocked(bmp, x, y, r, g, b, intensity);
+            AddScaledLocked(bmp, x + 1, y, r, g, b, edge);
+            AddScaledLocked(bmp, x - 1, y, r, g, b, edge);
+            AddScaledLocked(bmp, x, y + 1, r, g, b, edge);
+            AddScaledLocked(bmp, x, y - 1, r, g, b, edge);
+        }
+    }
+
+    /// <summary>
+    /// Draws a soft additive glow along a line (per-point radial falloff of the given radius),
+    /// with per-endpoint colours. Use a small radius for a neon halo. Bitmap must be locked.
+    /// </summary>
+    public static unsafe void DrawGlowLineAddLocked(WriteableBitmap bmp,
+        float x0, float y0, System.Windows.Media.Color c0,
+        float x1, float y1, System.Windows.Media.Color c1, float intensity, int radius)
+    {
+        if (intensity <= 0.004f || radius < 1) return;
+        int steps = (int)MathF.Ceiling(MathF.Max(MathF.Abs(x1 - x0), MathF.Abs(y1 - y0)));
+        if (steps < 1) steps = 1;
+        int r2 = radius * radius;
+        float sigma = radius * 0.62f;
+        float inv2s2 = 1f / (2f * sigma * sigma);
+        for (int i = 0; i <= steps; i++)
+        {
+            float t = i / (float)steps;
+            int x = (int)MathF.Round(x0 + (x1 - x0) * t);
+            int y = (int)MathF.Round(y0 + (y1 - y0) * t);
+            byte r = (byte)(c0.R + (c1.R - c0.R) * t);
+            byte g = (byte)(c0.G + (c1.G - c0.G) * t);
+            byte b = (byte)(c0.B + (c1.B - c0.B) * t);
+            for (int dy = -radius; dy <= radius; dy++)
+            {
+                int d2y = dy * dy;
+                for (int dx = -radius; dx <= radius; dx++)
+                {
+                    int d2 = d2y + dx * dx;
+                    if (d2 > r2) continue;
+                    float v = intensity * MathF.Exp(-d2 * inv2s2);
+                    if (v < 0.01f) continue;
+                    AddScaledLocked(bmp, x + dx, y + dy, r, g, b, v);
+                }
+            }
+        }
+    }
+
     /// <summary>Read a pixel's current BGRA colour. Bitmap must be locked.</summary>
     public static unsafe System.Windows.Media.Color ReadPixelLocked(WriteableBitmap bmp, int x, int y)
     {

@@ -16,11 +16,12 @@ using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Hardcodet.Wpf.TaskbarNotification;
 using Xstar.Music.App.Visualizer;
+using Xstar.Music.App.ThreeD;
 using Xstar.Music.Core;
 
 namespace Xstar.Music.App;
 
-public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
+public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
 {
     private readonly LibraryScanner _scanner = new();
     private MusicDatabase _database = null!;
@@ -59,7 +60,13 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
     private string _displayMode = "normal";
     private double _discSize = 1.2;
     private double _discSpeed = 26;
+    // CD mode: user zoom of the disc inside the (fixed) window. 1.0 = fills the window.
+    private double _cdZoom = 1.0;
+    private const double CdZoomMin = 0.1;
+    private const double CdZoomMax = 1.0;
+    private const double CdZoomStep = 1.12;
     private double _windowOpacity = 1.0;
+    private bool _hideTitleBrand;
     private Effect? _npBlurEffect;
     private const double FrameCornerRadius = 10;
     private bool _reduceMotion;
@@ -70,11 +77,22 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
     private List<(int Id, string Name)> _playlists = new();
     private readonly Dictionary<int, HashSet<string>> _playlistSongs = new();
     private readonly JamendoProvider _jamendo = new();
+    private readonly GdStudioProvider _gdStudio = new();
+    private readonly AudiusProvider _audius = new();
+    private readonly OnlineMusicService _online;
     private readonly List<SongRow> _onlineResults = new();
     private CancellationTokenSource? _onlineSearch;
     private bool _onlineMode;
+    private string _onlineProvider = OnlineMusicService.AllProviders;
+    private bool _suppressOnlineSourceEvent;
+    private int _onlineSearchGeneration;
     private string _jamendoClientId = "";
+    private string _gdSource = "netease";
+    private int _gdBitrate = 320;
+    private string _audiusAppName = "XstarMusic";
     private string _downloadFolder = "";
+    private Song? _currentOnline;
+    private bool _suppressPlaybackError;
 
     private int _sortMode;
 
@@ -83,12 +101,43 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
     private readonly double[] _eqGains = new double[10];
     private readonly List<Slider> _eqSliders = new();
     private readonly List<TextBlock> _eqGainTexts = new();
+    private ToggleButton? _eqEnableToggle;
     private bool _suppressEqSave;
 
     // Visualizer state
     private readonly VisualizerEngine _visualizerEngine;
     private string _visualizerStyle = "stardust";
     private bool _visualizerShowInfo = true;
+    private readonly DispatcherTimer _vizControlsTimer = new() { Interval = TimeSpan.FromSeconds(3.5) };
+    private bool _vizControlsVisible;
+    private bool _vizLyrics;
+    private readonly List<TextBlock> _vizLyricBlocks = new();
+
+    // 3D mode (WebView2 + Three.js)
+    private readonly ThreeDHost _threeDHost;
+    private readonly Dictionary<string, string?> _threeDCardArt = new(StringComparer.Ordinal);
+    private string _threeDLibraryKind = "albums";
+    private string _threeDQuality = "balanced";
+    private string _threeDShelfMode = "side";
+    private string _threeDShelfPresence = "always";
+    private string _threeDCameraMode = "dynamic";
+    private int _threeDCoverPreset;
+    private bool _threeDBloom = true;
+    private bool _threeDLyrics = true;
+    private double _threeDShelfSize = 1.0;
+    private double _threeDShelfOffsetX;
+    private double _threeDShelfOffsetY;
+    private double _threeDShelfAngleY;
+    private double _threeDShelfOpacity = 1.0;
+    private string _threeDBackgroundColor = "#05060A";
+    private string _threeDBackgroundImage = "";
+    private double _threeDParticleSize = 1.0;
+    private double _threeDGlow = 1.0;
+    private double _threeDParticleCount = 1.0;
+    private int _threeDParticleColorMode = 1;
+    private string _threeDParticleColor = "";
+    private string? _threeDBackgroundData;
+    private string _threeDBackgroundDataKey = "";
 
     private readonly string _settingsPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "XstarMusic", "settings.json");
     private readonly OnlineLyricsProvider _lyricsProvider = new(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "XstarMusic", "lyrics"));
@@ -101,6 +150,10 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 
     [DllImport("user32.dll")] private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
     [DllImport("user32.dll")] private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+    [DllImport("user32.dll")] private static extern bool ReleaseCapture();
+    [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+    private const int WmNcLButtonDown = 0x00A1;
+    private static readonly IntPtr HtCaption = new(2);
     [DllImport("dwmapi.dll")] private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
     private const int DwmwaWindowCornerPreference = 33;
     private const int DwmwaBorderColor = 34;
@@ -113,11 +166,47 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
     private const int GwlExStyle = -20;
     private const int WsExTransparent = 0x00000020;
 
+    /* ===== borderless-window sizing ===== */
+
+    private const int WmGetMinMaxInfo = 0x0024;
+    private const uint MonitorDefaultToNearest = 2;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativePoint { public int X; public int Y; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeRect { public int Left; public int Top; public int Right; public int Bottom; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MonitorInfo
+    {
+        public int cbSize;
+        public NativeRect rcMonitor;
+        public NativeRect rcWork;
+        public int dwFlags;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MinMaxInfo
+    {
+        public NativePoint ptReserved;
+        public NativePoint ptMaxSize;
+        public NativePoint ptMaxPosition;
+        public NativePoint ptMinTrackSize;
+        public NativePoint ptMaxTrackSize;
+    }
+
+    [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint dwFlags);
+    [DllImport("user32.dll")] private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MonitorInfo lpmi);
+
     public MainWindow()
     {
         InitializeComponent();
         SongList.ItemsSource = _songs;
+        _online = new OnlineMusicService(new IOnlineMusicProvider[] { _gdStudio, _audius, _jamendo });
+        PopulateOnlineSources();
         _visualizerEngine = new VisualizerEngine(_player);
+        _threeDHost = new ThreeDHost(ThreeDWebView, _player, this);
 
         _player.Opened += (_, _) => Dispatcher.Invoke(() =>
         {
@@ -133,6 +222,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         _player.Failed += (_, message) => Dispatcher.Invoke(() =>
         {
             PlayGlyphText.Text = "\uE768";
+            if (_suppressPlaybackError) return;
             MessageBox.Show($"无法播放此文件：{message}", "播放失败", MessageBoxButton.OK, MessageBoxImage.Warning);
         });
 
@@ -149,8 +239,13 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         StateChanged += (_, _) => UpdateFrameClip();
         WindowFrame.SizeChanged += (_, _) => UpdateFrameClip();
         VisualizerView.SizeChanged += VisualizerView_SizeChanged;
+        _vizControlsTimer.Tick += (_, _) => HideVisualizerControls();
+        PlaybackBar.MouseEnter += (_, _) => { if (IsVisualizerMode) _vizControlsTimer.Stop(); };
+        PlaybackBar.MouseLeave += (_, _) => { if (IsVisualizerMode) _vizControlsTimer.Start(); };
         UpdateFrameClip();
     }
+
+    private bool IsVisualizerMode => string.Equals(_displayMode, "visualizer", StringComparison.OrdinalIgnoreCase);
 
     private void VisualizerView_SizeChanged(object sender, SizeChangedEventArgs e)
     {
@@ -171,6 +266,10 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         // ApplicationThemeManager repaints the window background right after this, so re-assert
         // the fully transparent window surface (window background + composition target).
         EnsureTransparentWindowBackground();
+        // Code-built UI captures theme brushes at creation time, so re-apply the ones that live
+        // outside the dynamic-resource tree: the title-bar backdrop and the settings panels.
+        SyncTitleBarBackdrop();
+        if (SettingsOverlay.Visibility == Visibility.Visible) BuildSettings(_settingsSection);
     }
 
     /// <summary>
@@ -207,6 +306,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         ThemeManager.Changed -= OnThemeChanged;
         foreach (var watcher in _watchers.Values) watcher.Dispose();
         _visualizerEngine.Dispose();
+        _threeDHost.Dispose();
         if (_source is not null)
         {
             foreach (var key in MediaKeys) UnregisterHotKey(_source.Handle, key.Id);
@@ -228,6 +328,28 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 
     private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
     {
+        if (msg == WmGetMinMaxInfo)
+        {
+            // A WindowStyle=None window would otherwise maximize over the taskbar ("fullscreen").
+            // Clamp the maximized size/position to the monitor work area instead.
+            var mmi = Marshal.PtrToStructure<MinMaxInfo>(lParam);
+            var monitor = MonitorFromWindow(hwnd, MonitorDefaultToNearest);
+            if (monitor != IntPtr.Zero)
+            {
+                var info = new MonitorInfo { cbSize = Marshal.SizeOf<MonitorInfo>() };
+                if (GetMonitorInfo(monitor, ref info))
+                {
+                    mmi.ptMaxPosition.X = info.rcWork.Left - info.rcMonitor.Left;
+                    mmi.ptMaxPosition.Y = info.rcWork.Top - info.rcMonitor.Top;
+                    mmi.ptMaxSize.X = info.rcWork.Right - info.rcWork.Left;
+                    mmi.ptMaxSize.Y = info.rcWork.Bottom - info.rcWork.Top;
+                    Marshal.StructureToPtr(mmi, lParam, true);
+                }
+            }
+            handled = true;
+            return IntPtr.Zero;
+        }
+
         if (msg != WmHotkey) return IntPtr.Zero;
         switch (wParam.ToInt32())
         {
@@ -277,6 +399,18 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         Show();
         if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
         Activate();
+    }
+
+    /// <summary>Shows or hides the title-bar app icon and "XSTAR" caption.</summary>
+    private void ApplyTitleBrand()
+    {
+        TitleBarControl.Title = _hideTitleBrand ? string.Empty : "XSTAR";
+        TitleBarControl.Icon = _hideTitleBrand
+            ? null
+            : new Wpf.Ui.Controls.ImageIcon
+            {
+                Source = new BitmapImage(new Uri("pack://application:,,,/Assets/app.ico", UriKind.Absolute))
+            };
     }
 
     private void ApplyWindowOpacity(double value)
@@ -333,7 +467,10 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 
     private void UpdateFrameClip()
     {
-        var radius = WindowState == WindowState.Maximized || string.Equals(_displayMode, "cd", StringComparison.OrdinalIgnoreCase) ? 0 : FrameCornerRadius;
+        var radius = WindowState == WindowState.Maximized
+            || string.Equals(_displayMode, "cd", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(_displayMode, "mode3d", StringComparison.OrdinalIgnoreCase)
+            ? 0 : FrameCornerRadius;
         WindowFrame.Clip = new RectangleGeometry(
             new Rect(0, 0, WindowFrame.ActualWidth, WindowFrame.ActualHeight), radius, radius);
     }
@@ -389,18 +526,36 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 
     /* ===================== page switching ===================== */
 
-    private void PageToggle_Click(object sender, RoutedEventArgs e)
+    private void Playlist_Click(object sender, RoutedEventArgs e)
     {
-        var open = _page != "playlist";
-        if (open) CloseOverlays();
-        _page = open ? "playlist" : null;
+        CloseOverlays();
+        _page = "playlist";
+        PlaylistSearchBox.Text = "";
         Stage.Visibility = Visibility.Visible;
         ApplyPage();
         SyncTitleBarBackdrop();
     }
 
+    private void PlaylistSearch_TextChanged(object sender, TextChangedEventArgs e) => RenderQueue();
+
+    private void PlaylistClose_Click(object sender, RoutedEventArgs e)
+    {
+        _page = null;
+        ApplyPage();
+    }
+
     private void Lyrics_Click(object sender, RoutedEventArgs e)
     {
+        // In visualizer mode the same title-bar button toggles the lyrics overlay that
+        // sits on top of the visualization instead of navigating to the lyrics page.
+        if (IsVisualizerMode)
+        {
+            _vizLyrics = !_vizLyrics;
+            ApplyVisualizerLyrics();
+            SaveSettings();
+            return;
+        }
+
         var open = _page != "lyrics";
         if (open) CloseOverlays();
         _page = open ? "lyrics" : null;
@@ -409,14 +564,38 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         SyncTitleBarBackdrop();
     }
 
+    /// <summary>Shows / hides the lyrics overlay that renders on top of the visualizer.</summary>
+    private void ApplyVisualizerLyrics()
+    {
+        var show = IsVisualizerMode && _vizLyrics;
+        VisualizerLyricsOverlay.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+        UpdateVisualizerInfoOverlay();
+        if (!show) return;
+        if (_lyricLines.Count == 0) RenderLyrics();
+        else UpdateLyricHighlight(force: true);
+    }
+
+    /// <summary>Keeps the bottom song-info overlay hidden while the lyrics overlay is shown.</summary>
+    private void UpdateVisualizerInfoOverlay()
+    {
+        var lyricsUp = VisualizerLyricsOverlay.Visibility == Visibility.Visible;
+        VisualizerInfoOverlay.Visibility = IsVisualizerMode && _visualizerShowInfo && !lyricsUp
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+    }
+
     private void ApplyPage()
     {
         var album = _page is null;
         AlbumView.Visibility = album ? Visibility.Visible : Visibility.Collapsed;
         PlaylistPage.Visibility = _page == "playlist" ? Visibility.Visible : Visibility.Collapsed;
         LyricsPage.Visibility = _page == "lyrics" ? Visibility.Visible : Visibility.Collapsed;
+        LibraryPage.Visibility = _page is "library" or "online" ? Visibility.Visible : Visibility.Collapsed;
+        // Transparent pages must not reveal the visualizer that sits behind them.
+        VisualizerView.Visibility = album && IsVisualizerMode ? Visibility.Visible : Visibility.Collapsed;
         if (_page == "lyrics") RenderLyrics();
         else if (_page == "playlist") RenderQueue();
+        else if (_page is "library" or "online") RenderLibrary();
     }
 
     /* ===================== load / save ===================== */
@@ -453,24 +632,52 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
                 _displayMode = state?.DisplayMode ?? "normal";
                 _discSize = state?.DiscSize is > 0 ? state.DiscSize : 1.2;
                 _discSpeed = state?.DiscSpeed is > 0 ? state.DiscSpeed : 26;
+                _cdZoom = state?.CdZoom is > 0 ? Math.Clamp(state.CdZoom, CdZoomMin, CdZoomMax) : 1.0;
                 _windowOpacity = state?.WindowOpacity is >= 0 and <= 1 ? state.WindowOpacity : 1.0;
+                _hideTitleBrand = state?.HideTitleBrand ?? false;
                 _reduceMotion = state?.ReduceMotion ?? false;
                 _themeName = state?.Theme ?? "system";
                 _themePreset = state?.ThemePreset ?? "deepspace";
                 _accentSource = state?.AccentSource ?? "cover";
                 _jamendoClientId = state?.JamendoClientId ?? "";
                 _downloadFolder = state?.DownloadFolder ?? "";
-                _jamendo.ClientId = _jamendoClientId;
+                _onlineProvider = state?.OnlineProvider ?? OnlineMusicService.AllProviders;
+                _gdSource = state?.GdSource ?? "netease";
+                _gdBitrate = state?.GdBitrate ?? 320;
+                _audiusAppName = state?.AudiusAppName ?? "XstarMusic";
+                ConfigureOnlineProviders();
                 _eqEnabled = state?.EqEnabled ?? false;
                 var gains = state?.EqGains;
                 if (gains is not null && gains.Count == _eqGains.Length)
                     for (var i = 0; i < _eqGains.Length; i++) _eqGains[i] = gains[i];
                 _visualizerStyle = state?.VisualizerStyle ?? "stardust";
                 _visualizerShowInfo = state?.VisualizerShowInfo ?? true;
+                _vizLyrics = state?.VisualizerLyrics ?? false;
+                _threeDQuality = state?.ThreeDQuality ?? "balanced";
+                _threeDShelfMode = state?.ThreeDShelfMode ?? "side";
+                _threeDShelfPresence = state?.ThreeDShelfPresence ?? "always";
+                _threeDCameraMode = state?.ThreeDCameraMode ?? "dynamic";
+                _threeDLibraryKind = state?.ThreeDLibraryKind ?? "albums";
+                _threeDCoverPreset = state?.ThreeDCoverPreset ?? 0;
+                _threeDBloom = state?.ThreeDBloom ?? true;
+                _threeDLyrics = state?.ThreeDLyrics ?? true;
+                _threeDShelfSize = state?.ThreeDShelfSize is > 0.2 and < 3 ? state.ThreeDShelfSize : 1.0;
+                _threeDShelfOffsetX = state?.ThreeDShelfOffsetX ?? 0;
+                _threeDShelfOffsetY = state?.ThreeDShelfOffsetY ?? 0;
+                _threeDShelfAngleY = state?.ThreeDShelfAngleY ?? 0;
+                _threeDShelfOpacity = state?.ThreeDShelfOpacity is > 0 and <= 1 ? state.ThreeDShelfOpacity : 1.0;
+                _threeDBackgroundColor = state?.ThreeDBackgroundColor ?? "#05060A";
+                _threeDBackgroundImage = state?.ThreeDBackgroundImage ?? "";
+                _threeDParticleSize = state?.ThreeDParticleSize is > 0.1 and < 4 ? state.ThreeDParticleSize : 1.0;
+                _threeDGlow = state?.ThreeDGlow is >= 0 and <= 4 ? state.ThreeDGlow : 1.0;
+                _threeDParticleCount = state?.ThreeDParticleCount is > 0.2 and < 2 ? state.ThreeDParticleCount : 1.0;
+                _threeDParticleColorMode = state?.ThreeDParticleColorMode is >= 0 and <= 2 ? state.ThreeDParticleColorMode : 1;
+                _threeDParticleColor = state?.ThreeDParticleColor ?? "";
             }
             ThemeManager.ApplyPreset(ThemeManager.GetPreset(_themePreset));
             ThemeManager.SetMode(ParseTheme(_themeName));
             ApplyWindowOpacity(_windowOpacity);
+            ApplyTitleBrand();
             EnsureTransparentWindowBackground();
             ModeGlyphText.Text = ModeGlyph(_playbackMode);
             _player.SetMode(_playbackMode);
@@ -508,17 +715,44 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
                 DisplayMode = _displayMode,
                 DiscSize = _discSize,
                 DiscSpeed = _discSpeed,
+                CdZoom = _cdZoom,
                 WindowOpacity = _windowOpacity,
+                HideTitleBrand = _hideTitleBrand,
                 ReduceMotion = _reduceMotion,
                 Theme = _themeName,
                 ThemePreset = _themePreset,
                 AccentSource = _accentSource,
                 JamendoClientId = _jamendoClientId,
                 DownloadFolder = _downloadFolder,
+                OnlineProvider = _onlineProvider,
+                GdSource = _gdSource,
+                GdBitrate = _gdBitrate,
+                AudiusAppName = _audiusAppName,
                 EqEnabled = _eqEnabled,
                 EqGains = _eqGains.ToList(),
                 VisualizerStyle = _visualizerStyle,
-                VisualizerShowInfo = _visualizerShowInfo
+                VisualizerShowInfo = _visualizerShowInfo,
+                VisualizerLyrics = _vizLyrics,
+                ThreeDQuality = _threeDQuality,
+                ThreeDShelfMode = _threeDShelfMode,
+                ThreeDShelfPresence = _threeDShelfPresence,
+                ThreeDCameraMode = _threeDCameraMode,
+                ThreeDLibraryKind = _threeDLibraryKind,
+                ThreeDCoverPreset = _threeDCoverPreset,
+                ThreeDBloom = _threeDBloom,
+                ThreeDLyrics = _threeDLyrics,
+                ThreeDShelfSize = _threeDShelfSize,
+                ThreeDShelfOffsetX = _threeDShelfOffsetX,
+                ThreeDShelfOffsetY = _threeDShelfOffsetY,
+                ThreeDShelfAngleY = _threeDShelfAngleY,
+                ThreeDShelfOpacity = _threeDShelfOpacity,
+                ThreeDBackgroundColor = _threeDBackgroundColor,
+                ThreeDBackgroundImage = _threeDBackgroundImage,
+                ThreeDParticleSize = _threeDParticleSize,
+                ThreeDGlow = _threeDGlow,
+                ThreeDParticleCount = _threeDParticleCount,
+                ThreeDParticleColorMode = _threeDParticleColorMode,
+                ThreeDParticleColor = _threeDParticleColor
             }));
         }
         catch { }
@@ -674,20 +908,20 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 
     private void RenderQueue()
     {
-        SongList.ItemsSource = _songs.ToList();
+        IEnumerable<SongRow> rows = _songs;
+        var keyword = PlaylistSearchBox.Text.Trim();
+        if (!string.IsNullOrWhiteSpace(keyword))
+            rows = rows.Where(x => $"{x.Title}{x.Artist}{x.Song.Album}".Contains(keyword, StringComparison.OrdinalIgnoreCase));
+        SongList.ItemsSource = rows.ToList();
     }
 
     private void RenderLibrary()
     {
+        LibraryList.ItemTemplate = (DataTemplate)FindResource(_onlineMode ? "OnlineSongTemplate" : "PlaylistSongTemplate");
         if (_onlineMode)
         {
-            var onlineKeyword = SearchBox.Text.Trim();
-            var online = _onlineResults.AsEnumerable();
-            if (!string.IsNullOrWhiteSpace(onlineKeyword))
-                online = online.Where(x => $"{x.Title}{x.Artist}{x.Song.Album}".Contains(onlineKeyword, StringComparison.OrdinalIgnoreCase));
-            LibraryList.ItemsSource = online.ToList();
-            LibraryList.Visibility = Visibility.Visible;
-            LibraryGridScroll.Visibility = Visibility.Collapsed;
+            LibraryList.ItemsSource = _onlineResults.ToList();
+            SetLibraryListVisible(true);
             return;
         }
 
@@ -701,8 +935,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
                 .Select(p => new LibraryItem(p.Name, $"{(_playlistSongs.TryGetValue(p.Id, out var set) ? set.Count : 0)} 首", null, 0))
                 .ToList();
             LibraryGrid.ItemsSource = cards;
-            LibraryGridScroll.Visibility = Visibility.Visible;
-            LibraryList.Visibility = Visibility.Collapsed;
+            SetLibraryListVisible(false);
             return;
         }
 
@@ -712,8 +945,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
                 ? rows.GroupBy(x => x.Song.Album).Select(g => new LibraryItem(g.Key, g.First().Song.Artist, g.First().Song.ArtworkPath, g.Count())).ToList()
                 : rows.GroupBy(x => x.Song.Artist).Select(g => new LibraryItem(g.Key, $"{g.Count()} 首", g.First().Song.ArtworkPath, g.Count())).ToList();
             LibraryGrid.ItemsSource = cards;
-            LibraryGridScroll.Visibility = Visibility.Visible;
-            LibraryList.Visibility = Visibility.Collapsed;
+            SetLibraryListVisible(false);
             return;
         }
 
@@ -725,8 +957,16 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
             else { _view = "songs"; }
         }
         LibraryList.ItemsSource = rows.ToList();
-        LibraryList.Visibility = Visibility.Visible;
-        LibraryGridScroll.Visibility = Visibility.Collapsed;
+        SetLibraryListVisible(true);
+    }
+
+    /// <summary>Toggles between the list view (with column header) and the album/artist card grid.</summary>
+    private void SetLibraryListVisible(bool list)
+    {
+        LibraryList.Visibility = list ? Visibility.Visible : Visibility.Collapsed;
+        LibraryGridScroll.Visibility = list ? Visibility.Collapsed : Visibility.Visible;
+        LibraryColumns.Visibility = list ? Visibility.Visible : Visibility.Collapsed;
+        LibraryDivider.Visibility = list ? Visibility.Visible : Visibility.Collapsed;
     }
 
     /* ===================== selection / playback ===================== */
@@ -735,6 +975,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
     {
         if (index < 0 || index >= _songs.Count) return;
         _currentIndex = index;
+        _currentOnline = null;
         var song = _songs[index].Song;
         if (play)
         {
@@ -743,24 +984,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
             _historyTicks[song.Id] = playedAt;
         }
 
-        TitleText.Text = song.Title;
-        SubText.Text = string.IsNullOrWhiteSpace(song.Album) ? song.Artist : $"{song.Artist} · {song.Album}";
-        CdTitleText.Text = song.Title;
-        CdSubText.Text = song.Artist;
-        var artwork = ArtworkLoader.LoadForSong(song);
-        QualityText.Text = song.Quality;
-        ApplyQualityVisual(song.Quality);
-        var spec = BuildMetaText(song);
-        SpecChip.Visibility = string.IsNullOrWhiteSpace(spec) ? Visibility.Collapsed : Visibility.Visible;
-        SpecText.Text = spec ?? "";
-
-        var accent = _accentSource == "cover"
-            ? (CoverColorExtractor.Extract(artwork) ?? ThemeManager.CurrentPreset.Accent)
-            : ThemeManager.CurrentPreset.Accent;
-        ThemeManager.ApplyAccent(accent);
-        UpdateNowPlayingGradient();
-        _discArtwork = artwork;
-        UpdateDiscLabel(artwork, accent);
+        UpdateNowPlayingUi(song);
 
         if (File.Exists(song.Path))
         {
@@ -777,10 +1001,38 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         AnimateNowPlaying();
         _timer.Start();
         UpdateDiscRotation();
+    }
 
-        // Sync visualizer info overlay
+    private void UpdateNowPlayingUi(Song song)
+    {
+        TitleText.Text = song.Title;
+        SubText.Text = string.IsNullOrWhiteSpace(song.Album) ? song.Artist : $"{song.Artist} · {song.Album}";
+        CdTitleText.Text = song.Title;
+        CdSubText.Text = song.Artist;
+        VizLyricsTitle.Text = song.Title;
+        VizLyricsSub.Text = song.Artist;
+        LyricsHead.Text = song.Title;
+        LyricsSub.Text = song.Artist;
+        var artwork = ArtworkLoader.LoadForSong(song);
+        QualityText.Text = song.Quality;
+        ApplyQualityVisual(song.Quality);
+        var spec = BuildMetaText(song);
+        SpecChip.Visibility = string.IsNullOrWhiteSpace(spec) ? Visibility.Collapsed : Visibility.Visible;
+        SpecText.Text = spec ?? "";
+        VizSpecChip.Visibility = SpecChip.Visibility;
+        VizSpecText.Text = spec ?? "";
+
+        var accent = _accentSource == "cover"
+            ? (CoverColorExtractor.Extract(artwork) ?? ThemeManager.CurrentPreset.Accent)
+            : ThemeManager.CurrentPreset.Accent;
+        ThemeManager.ApplyAccent(accent);
+        UpdateNowPlayingGradient();
+        _discArtwork = artwork;
+        UpdateDiscLabel(artwork, accent);
+
         VisualizerTitleText.Text = song.Title;
         VisualizerSubText.Text = string.IsNullOrWhiteSpace(song.Album) ? song.Artist : $"{song.Artist} · {song.Album}";
+        _threeDHost.PushArtwork();
     }
 
     private void UpdateNowPlayingGradient()
@@ -919,10 +1171,17 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         NowPlayingDisc.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
 
         var scale = _discSize;
+        var side = Math.Min(Stage.ActualWidth, Stage.ActualHeight);
         if (cd)
         {
-            var side = Math.Min(Stage.ActualWidth, Stage.ActualHeight);
-            if (side > 40) scale = side / 340.0;
+            // Fill the fixed CD window, then apply the user's wheel/pinch zoom on top.
+            var fit = side > 40 ? side / 340.0 : _discSize;
+            scale = fit * _cdZoom;
+        }
+        else if (side > 40)
+        {
+            // Shrink the disc on narrow/short windows so it never overflows the stage.
+            scale = Math.Min(_discSize, Math.Max(0.55, (side - 24) / 340.0));
         }
 
         DiscScale.ScaleX = scale;
@@ -970,6 +1229,9 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
     /// <summary>Light caption foreground forced while the (always-dark) visualizer is shown.</summary>
     private static readonly Brush VizTitleBarForeground = new SolidColorBrush(Color.FromArgb(235, 233, 236, 242));
 
+    /// <summary>Inactive lyric colour used over the (always-dark) visualizer backdrop.</summary>
+    private static readonly Brush VizLyricInactiveBrush = new SolidColorBrush(Color.FromArgb(0xB3, 255, 255, 255));
+
     private void ApplyVisualizerTitleBarChrome(bool viz)
     {
         if (viz)
@@ -978,6 +1240,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
             // even while a light theme preset is active.
             TitleBarControl.Foreground = VizTitleBarForeground;
             TitleBarControl.ButtonsForeground = VizTitleBarForeground;
+            LibraryButton.Foreground = VizTitleBarForeground;
             SettingsButton.Foreground = VizTitleBarForeground;
             ViewModeButton.Foreground = VizTitleBarForeground;
         }
@@ -985,44 +1248,150 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         {
             TitleBarControl.ClearValue(Control.ForegroundProperty);
             TitleBarControl.ClearValue(Wpf.Ui.Controls.TitleBar.ButtonsForegroundProperty);
+            LibraryButton.ClearValue(Control.ForegroundProperty);
             SettingsButton.ClearValue(Control.ForegroundProperty);
             ViewModeButton.ClearValue(Control.ForegroundProperty);
         }
+    }
+
+    /// <summary>
+    /// The visualizer backdrop is always dark, so the transport bar keeps a light foreground
+    /// there even while a light theme preset is active.
+    /// </summary>
+    private void ApplyVisualizerPlaybackChrome(bool viz)
+    {
+        var transport = new[] { ModeButton, PreviousButton, PlayButton, NextButton, VolumeButton, VizStyleButton };
+        VizStyleHost.Visibility = viz ? Visibility.Visible : Visibility.Collapsed;
+        if (viz)
+        {
+            foreach (var button in transport) button.Foreground = VizTitleBarForeground;
+            // Blend the play/pause control into the visualization instead of its accent disc.
+            PlayButton.Appearance = Wpf.Ui.Controls.ControlAppearance.Transparent;
+            CurrentTime.Foreground = VizTitleBarForeground;
+            TotalTime.Foreground = VizTitleBarForeground;
+        }
+        else
+        {
+            foreach (var button in transport) button.ClearValue(Control.ForegroundProperty);
+            PlayButton.Appearance = Wpf.Ui.Controls.ControlAppearance.Primary;
+            CurrentTime.SetResourceReference(TextBlock.ForegroundProperty, "TextFillColorSecondaryBrush");
+            TotalTime.SetResourceReference(TextBlock.ForegroundProperty, "TextFillColorSecondaryBrush");
+            VizStylePopup.IsOpen = false;
+        }
+    }
+
+    /// <summary>Reveals the transport bar, fading it in and restarting the auto-hide timer.</summary>
+    private void ShowVisualizerControls(bool restartTimer = true)
+    {
+        if (!IsVisualizerMode) return;
+        if (!_vizControlsVisible)
+        {
+            _vizControlsVisible = true;
+            PlaybackBar.IsHitTestVisible = true;
+            if (_reduceMotion)
+            {
+                PlaybackBar.BeginAnimation(OpacityProperty, null);
+                PlaybackBar.Opacity = 1;
+            }
+            else
+            {
+                PlaybackBar.BeginAnimation(OpacityProperty, new DoubleAnimation(PlaybackBar.Opacity, 1, TimeSpan.FromMilliseconds(180))
+                {
+                    EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
+                });
+            }
+        }
+        if (restartTimer) { _vizControlsTimer.Stop(); _vizControlsTimer.Start(); }
+    }
+
+    /// <summary>Fades the transport bar out once the pointer has been idle. Kept while hovered or while a popup is open.</summary>
+    private void HideVisualizerControls()
+    {
+        _vizControlsTimer.Stop();
+        if (!IsVisualizerMode) return;
+        if (PlaybackBar.IsMouseOver || VolumePopup.IsOpen || VizStylePopup.IsOpen)
+        {
+            _vizControlsTimer.Start();
+            return;
+        }
+        if (!_vizControlsVisible) return;
+        _vizControlsVisible = false;
+        PlaybackBar.IsHitTestVisible = false;
+        if (_reduceMotion)
+        {
+            PlaybackBar.BeginAnimation(OpacityProperty, null);
+            PlaybackBar.Opacity = 0;
+        }
+        else
+        {
+            PlaybackBar.BeginAnimation(OpacityProperty, new DoubleAnimation(PlaybackBar.Opacity, 0, TimeSpan.FromMilliseconds(320))
+            {
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseIn }
+            });
+        }
+    }
+
+    /// <summary>Restores the transport bar's always-visible state used outside visualizer mode.</summary>
+    private void ResetVisualizerControls()
+    {
+        _vizControlsTimer.Stop();
+        _vizControlsVisible = false;
+        PlaybackBar.BeginAnimation(OpacityProperty, null);
+        PlaybackBar.Opacity = 1;
+        PlaybackBar.IsHitTestVisible = true;
     }
 
     private void ApplyDisplayMode()
     {
         var cd = string.Equals(_displayMode, "cd", StringComparison.OrdinalIgnoreCase);
         var viz = string.Equals(_displayMode, "visualizer", StringComparison.OrdinalIgnoreCase);
-        var immersive = cd || viz;
+        var mode3d = string.Equals(_displayMode, "mode3d", StringComparison.OrdinalIgnoreCase);
+        var immersive = cd || viz || mode3d;
 
         // Album / playlist / lyrics visibility
-        AlbumView.Visibility = viz ? Visibility.Collapsed : Visibility.Visible;
+        AlbumView.Visibility = (viz || mode3d) ? Visibility.Collapsed : Visibility.Visible;
         PlaylistPage.Visibility = Visibility.Collapsed;  // always hidden in viz mode
         LyricsPage.Visibility = Visibility.Collapsed;
 
         // Visualizer view visibility
         VisualizerView.Visibility = viz ? Visibility.Visible : Visibility.Collapsed;
+        ThreeDView.Visibility = mode3d ? Visibility.Visible : Visibility.Collapsed;
 
-        TitleBarControl.Opacity = cd ? 0 : 1;
-        TitleBarControl.IsHitTestVisible = !cd;
-        TitleBarControl.Height = cd ? 0 : 32;
+        TitleBarControl.Opacity = (cd || mode3d) ? 0 : 1;
+        TitleBarControl.IsHitTestVisible = !(cd || mode3d);
+        TitleBarControl.Height = (cd || mode3d) ? 0 : 32;
         ApplyVisualizerTitleBarChrome(viz);
+        ApplyVisualizerPlaybackChrome(viz);
         NpBackground.Visibility = immersive ? Visibility.Collapsed : Visibility.Visible;
-        PlaybackBar.Visibility = immersive ? Visibility.Collapsed : Visibility.Visible;
+        // CD mode hides the transport entirely; visualizer mode keeps it (auto-hiding) so
+        // playback can be controlled without leaving the immersive view. 3D mode draws its
+        // own transport inside the page.
+        PlaybackBar.Visibility = (cd || mode3d) ? Visibility.Collapsed : Visibility.Visible;
         InfoChips.Visibility = immersive ? Visibility.Collapsed : Visibility.Visible;
-        PlaylistButton.Visibility = immersive ? Visibility.Collapsed : Visibility.Visible;
-        LyricsButton.Visibility = immersive ? Visibility.Collapsed : Visibility.Visible;
-        LibraryButton.Visibility = immersive ? Visibility.Collapsed : Visibility.Visible;
-        EqButton.Visibility = immersive ? Visibility.Collapsed : Visibility.Visible;
+        // Only CD mode hides the whole title bar (the remaining title-bar buttons stay in both
+        // normal and visualizer mode).
+        LibraryButton.Visibility = cd ? Visibility.Collapsed : Visibility.Visible;
         NowPlayingDisc.Margin = cd ? new Thickness(0) : new Thickness(0, 0, 0, 72);
         NowPlayingInfo.Margin = cd ? new Thickness(24) : new Thickness(24, 0, 24, 72);
         DiscBase.Effect = cd ? null : _discShadow;
+        // Only CD mode handles touch pinch; elsewhere it would swallow normal touch input.
+        Stage.IsManipulationEnabled = cd;
 
         if (cd)
         {
             // CD mode keeps a fully transparent window surface (desktop shows around the disc).
             WindowFrame.Background = Brushes.Transparent;
+            WindowFrame.BorderBrush = null;
+            WindowFrame.BorderThickness = new Thickness(0);
+            WindowFrame.CornerRadius = new CornerRadius(0);
+            EnsureTransparentWindowBackground();
+        }
+        else if (mode3d)
+        {
+            // 3D mode is fully immersive: an opaque themed-dark surface sits behind the
+            // WebView2 (a layered window would otherwise skip transparent pixels).
+            SyncVisualizerTheme();
+            WindowFrame.Background = _vizSurfaceBrush;
             WindowFrame.BorderBrush = null;
             WindowFrame.BorderThickness = new Thickness(0);
             WindowFrame.CornerRadius = new CornerRadius(0);
@@ -1078,19 +1447,448 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
                     ? _songs[_currentIndex].Artist
                     : $"{_songs[_currentIndex].Artist} · {_songs[_currentIndex].Song.Album}")
                 : "";
-            VisualizerInfoOverlay.Visibility = _visualizerShowInfo ? Visibility.Visible : Visibility.Collapsed;
+            // Lift the info overlay above the auto-hiding transport bar.
+            VisualizerInfoOverlay.Margin = new Thickness(0, 0, 0, 150);
+            UpdateVisualizerInfoOverlay();
+            ShowVisualizerControls();
         }
         else
         {
             // Stop visualizer
             _visualizerEngine.Stop();
+            ResetVisualizerControls();
         }
 
+        if (mode3d)
+        {
+            _page = null;
+            ApplyPage();
+            CloseOverlays();
+            StartThreeDMode();
+        }
+        else
+        {
+            _threeDHost.Stop();
+        }
+
+        ApplyVisualizerLyrics();
         ApplyCdWindow(cd);
         ApplyCdChrome(cd);
         ApplyCdLyrics();
         UpdateFrameClip();
         UpdateDiscRotation();
+    }
+
+    /* ===================== 3D mode (WebView2 + Three.js) ===================== */
+
+    private async void StartThreeDMode()
+    {
+        var ok = await _threeDHost.StartAsync();
+        if (ok) return;
+        // WebView2 runtime missing / init failed — record the reason and fall back to the normal shell.
+        ThreeDHost.LogClientError("3D start failed: " + _threeDHost.LastError);
+        _displayMode = "normal";
+        ApplyDisplayMode();
+        SaveSettings();
+        Toast("3D 模式需要 WebView2 运行时，未能启动。");
+    }
+
+    private static string AccentHex()
+    {
+        var c = ThemeManager.AccentColor;
+        return $"#{c.R:X2}{c.G:X2}{c.B:X2}";
+    }
+
+    private (string Title, string Artist, string Album) CurrentTrackInfo()
+    {
+        if (_currentOnline is not null)
+            return (_currentOnline.Title, _currentOnline.Artist, _currentOnline.Album);
+        if (_currentIndex >= 0 && _currentIndex < _songs.Count)
+        {
+            var row = _songs[_currentIndex];
+            return (row.Title, row.Artist, row.Song.Album);
+        }
+        return ("", "", "");
+    }
+
+    string IThreeDActions.ThreeDGetStateJson()
+    {
+        var (title, artist, album) = CurrentTrackInfo();
+        var snapshot = _player.Snapshot;
+        var message = new ThreeDStateMessage
+        {
+            Title = title,
+            Artist = artist,
+            Album = album,
+            DurationMs = (long)snapshot.Duration.TotalMilliseconds,
+            PositionMs = (long)snapshot.Position.TotalMilliseconds,
+            Playing = snapshot.IsPlaying,
+            Accent = AccentHex(),
+            Volume = VolumeSlider.Value,
+            Light = ThemeManager.IsLight
+        };
+        return JsonSerializer.Serialize(message, ThreeDJson.Options);
+    }
+
+    string IThreeDActions.ThreeDGetArtworkJson()
+    {
+        var artworkKey = _currentIndex >= 0 && _currentIndex < _songs.Count
+            ? _songs[_currentIndex].Song.Path
+            : _currentOnline?.Path;
+        var message = new ThreeDArtworkMessage
+        {
+            Data = ArtworkBridge.Encode(_discArtwork as BitmapSource, artworkKey)
+        };
+        return JsonSerializer.Serialize(message, ThreeDJson.Options);
+    }
+
+    string IThreeDActions.ThreeDGetLibraryJson(string kind)
+    {
+        var cards = new List<ThreeDCard>();
+        switch (kind)
+        {
+            case "playlists":
+                cards.Add(new ThreeDCard
+                {
+                    Id = "favorites",
+                    Title = "收藏",
+                    Subtitle = "我喜欢的音乐",
+                    Kind = "collection",
+                    Count = _songs.Count(x => x.IsFavorite)
+                });
+                cards.AddRange(_playlists.Select(p => new ThreeDCard
+                {
+                    Id = "playlist:" + p.Id,
+                    Title = p.Name,
+                    Subtitle = (_playlistSongs.TryGetValue(p.Id, out var set) ? set.Count : 0) + " 首",
+                    Kind = "collection",
+                    Count = _playlistSongs.TryGetValue(p.Id, out var s) ? s.Count : 0
+                }));
+                break;
+            case "recent":
+                cards.AddRange(_songs
+                    .Where(x => _historyTicks.ContainsKey(x.Song.Id))
+                    .OrderByDescending(x => _historyTicks[x.Song.Id])
+                    .Take(80)
+                    .Select(x => new ThreeDCard
+                    {
+                        Id = "track:" + x.Song.Id,
+                        Title = x.Title,
+                        Subtitle = x.Artist,
+                        Kind = "track"
+                    }));
+                break;
+            default: // albums
+                cards.AddRange(_songs
+                    .GroupBy(x => x.Song.Album)
+                    .OrderBy(g => g.Key, StringComparer.CurrentCulture)
+                    .Select(g => new ThreeDCard
+                    {
+                        Id = "album:" + g.Key,
+                        Title = g.Key,
+                        Subtitle = g.First().Song.Artist,
+                        Kind = "collection",
+                        Count = g.Count()
+                    }));
+                break;
+        }
+
+        _threeDLibraryKind = kind;
+        var message = new ThreeDLibraryMessage { Kind = kind, Cards = cards };
+        return JsonSerializer.Serialize(message, ThreeDJson.Options);
+    }
+
+    string IThreeDActions.ThreeDGetDetailJson(string id)
+    {
+        var title = id;
+        var subtitle = "";
+        var rows = new List<SongRow>();
+
+        if (id.StartsWith("album:", StringComparison.Ordinal))
+        {
+            var album = id[6..];
+            title = album;
+            rows = _songs.Where(x => x.Song.Album == album).OrderBy(x => x.Song.Title, StringComparer.CurrentCulture).ToList();
+        }
+        else if (id.StartsWith("playlist:", StringComparison.Ordinal) && int.TryParse(id[9..], out var playlistId))
+        {
+            var playlist = _playlists.FirstOrDefault(p => p.Id == playlistId);
+            title = string.IsNullOrEmpty(playlist.Name) ? "播放列表" : playlist.Name;
+            if (_playlistSongs.TryGetValue(playlistId, out var set))
+                rows = _songs.Where(x => set.Contains(x.Song.Id)).ToList();
+        }
+        else if (id == "favorites")
+        {
+            title = "收藏";
+            rows = _songs.Where(x => x.IsFavorite).ToList();
+        }
+
+        subtitle = rows.Count + " 首";
+        var tracks = rows.Select((x, i) => new ThreeDTrack
+        {
+            Id = x.Song.Id,
+            Title = x.Title,
+            Artist = x.Artist,
+            DurationMs = x.Song.DurationMs,
+            Index = i
+        }).ToList();
+
+        var message = new ThreeDDetailMessage { Id = id, Title = title, Subtitle = subtitle, Tracks = tracks };
+        return JsonSerializer.Serialize(message, ThreeDJson.Options);
+    }
+
+    string IThreeDActions.ThreeDGetCardArtworkJson(string key)
+    {
+        if (!_threeDCardArt.TryGetValue(key, out var data))
+        {
+            var song = ResolveCardSong(key);
+            BitmapSource? bitmap = null;
+            if (song is not null)
+            {
+                bitmap = !string.IsNullOrEmpty(song.ArtworkPath) && File.Exists(song.ArtworkPath)
+                    ? ArtworkLoader.Load(song.ArtworkPath)
+                    : ArtworkLoader.LoadForSong(song);
+            }
+            data = ArtworkBridge.EncodeBitmap(bitmap, 160);
+            _threeDCardArt[key] = data;
+        }
+
+        var message = new ThreeDArtworkMessage { Key = key, Data = data };
+        return JsonSerializer.Serialize(message, ThreeDJson.Options);
+    }
+
+    string IThreeDActions.ThreeDGetLyricsJson()
+    {
+        var lines = _lyricLines
+            .Select(line => new ThreeDLyricLine { TimeMs = line.TimeMs, Text = line.Text })
+            .ToList();
+        var message = new ThreeDLyricsMessage { Lines = lines };
+        return JsonSerializer.Serialize(message, ThreeDJson.Options);
+    }
+
+    string IThreeDActions.ThreeDGetLyricIndexJson()
+    {
+        var message = new ThreeDLyricIndexMessage { Index = _lastLyricIndex };
+        return JsonSerializer.Serialize(message, ThreeDJson.Options);
+    }
+
+    string IThreeDActions.ThreeDGetSettingsJson()
+    {
+        var message = new ThreeDSettingsMessage
+        {
+            Quality = _threeDQuality,
+            ShelfMode = _threeDShelfMode,
+            ShelfPresence = _threeDShelfPresence,
+            CameraMode = _threeDCameraMode,
+            LibraryKind = _threeDLibraryKind,
+            CoverPreset = _threeDCoverPreset,
+            Bloom = _threeDBloom,
+            Lyrics = _threeDLyrics,
+            ReduceMotion = _reduceMotion,
+            ShelfSize = _threeDShelfSize,
+            ShelfOffsetX = _threeDShelfOffsetX,
+            ShelfOffsetY = _threeDShelfOffsetY,
+            ShelfAngleY = _threeDShelfAngleY,
+            ShelfOpacity = _threeDShelfOpacity,
+            BackgroundColor = _threeDBackgroundColor,
+            BackgroundImage = EncodeBackgroundImage(),
+            ParticleSize = _threeDParticleSize,
+            Glow = _threeDGlow,
+            ParticleCount = _threeDParticleCount,
+            ParticleColorMode = _threeDParticleColorMode,
+            ParticleColor = _threeDParticleColor
+        };
+        return JsonSerializer.Serialize(message, ThreeDJson.Options);
+    }
+
+    private string? EncodeBackgroundImage()
+    {
+        if (string.IsNullOrEmpty(_threeDBackgroundImage) || !File.Exists(_threeDBackgroundImage)) return null;
+        if (_threeDBackgroundDataKey == _threeDBackgroundImage) return _threeDBackgroundData;
+        _threeDBackgroundData = ArtworkBridge.EncodeBitmap(ArtworkLoader.Load(_threeDBackgroundImage), 1920);
+        _threeDBackgroundDataKey = _threeDBackgroundImage;
+        return _threeDBackgroundData;
+    }
+
+    void IThreeDActions.ThreeDPickBackgroundImage()
+    {
+        var dialog = new Microsoft.Win32.OpenFileDialog
+        {
+            Title = "选择 3D 背景图片",
+            Filter = "图片|*.jpg;*.jpeg;*.png;*.bmp;*.webp;*.gif|所有文件|*.*"
+        };
+        if (dialog.ShowDialog() != true) return;
+        _threeDBackgroundImage = dialog.FileName;
+        _threeDBackgroundDataKey = "";
+        SaveSettings();
+        _threeDHost.PushSettings();
+    }
+
+    void IThreeDActions.ThreeDClearBackgroundImage()
+    {
+        _threeDBackgroundImage = "";
+        _threeDBackgroundData = null;
+        _threeDBackgroundDataKey = "";
+        SaveSettings();
+        _threeDHost.PushSettings();
+    }
+
+    private Song? ResolveCardSong(string cardId)
+    {
+        if (cardId.StartsWith("album:", StringComparison.Ordinal))
+        {
+            var album = cardId[6..];
+            return _songs.FirstOrDefault(x => x.Song.Album == album)?.Song;
+        }
+        if (cardId.StartsWith("playlist:", StringComparison.Ordinal) && int.TryParse(cardId[9..], out var playlistId))
+        {
+            if (_playlistSongs.TryGetValue(playlistId, out var set))
+                return _songs.FirstOrDefault(x => set.Contains(x.Song.Id))?.Song;
+            return null;
+        }
+        if (cardId == "favorites")
+            return _songs.FirstOrDefault(x => x.IsFavorite)?.Song;
+        if (cardId.StartsWith("track:", StringComparison.Ordinal))
+        {
+            var songId = cardId[6..];
+            return _songs.FirstOrDefault(x => x.Song.Id == songId)?.Song;
+        }
+        return null;
+    }
+
+    void IThreeDActions.ThreeDPlay()
+    {
+        if (!_player.Snapshot.IsPlaying) Play_Click(this, new RoutedEventArgs());
+        _threeDHost.PushState();
+    }
+
+    void IThreeDActions.ThreeDPause()
+    {
+        if (_player.Snapshot.IsPlaying) Play_Click(this, new RoutedEventArgs());
+        _threeDHost.PushState();
+    }
+
+    void IThreeDActions.ThreeDNext()
+    {
+        Next_Click(this, new RoutedEventArgs());
+        _threeDHost.PushState();
+    }
+
+    void IThreeDActions.ThreeDPrev()
+    {
+        Previous_Click(this, new RoutedEventArgs());
+        _threeDHost.PushState();
+    }
+
+    void IThreeDActions.ThreeDSeek(long positionMs)
+    {
+        var duration = _player.Snapshot.Duration;
+        if (duration > TimeSpan.Zero)
+            _player.Seek(TimeSpan.FromMilliseconds(Math.Clamp(positionMs, 0, (long)duration.TotalMilliseconds)));
+        _threeDHost.PushState();
+    }
+
+    void IThreeDActions.ThreeDSetVolume(double volume)
+    {
+        volume = Math.Clamp(volume, 0, 1);
+        VolumeSlider.Value = volume;
+        _player.SetVolume(volume);
+    }
+
+    void IThreeDActions.ThreeDSetDisplayMode(string mode)
+    {
+        _displayMode = string.IsNullOrWhiteSpace(mode) ? "normal" : mode;
+        ApplyDisplayMode();
+        SaveSettings();
+    }
+
+    void IThreeDActions.ThreeDWindowDrag()
+    {
+        // The WebView2 child HWND owns the mouse, so WPF's DragMove() never sees the pressed
+        // button. Ask the OS to start a caption drag instead, which uses the real mouse state.
+        var handle = new WindowInteropHelper(this).Handle;
+        if (handle == IntPtr.Zero) return;
+        ReleaseCapture();
+        SendMessage(handle, WmNcLButtonDown, HtCaption, IntPtr.Zero);
+    }
+
+    void IThreeDActions.ThreeDWindowResize(string edge)
+    {
+        // The WebView2 covers the whole client area, so the OS never sees the cursor on a resize
+        // border. Map the page's edge gutters onto the matching non-client hit-test code and let
+        // the OS run its own resize loop (same trick as the caption drag).
+        var handle = new WindowInteropHelper(this).Handle;
+        if (handle == IntPtr.Zero) return;
+        var ht = edge switch
+        {
+            "left" => 10,          // HTLEFT
+            "right" => 11,         // HTRIGHT
+            "top" => 12,           // HTTOP
+            "topleft" => 13,       // HTTOPLEFT
+            "topright" => 14,      // HTTOPRIGHT
+            "bottom" => 15,        // HTBOTTOM
+            "bottomleft" => 16,    // HTBOTTOMLEFT
+            "bottomright" => 17,   // HTBOTTOMRIGHT
+            _ => 0
+        };
+        if (ht == 0) return;
+        ReleaseCapture();
+        SendMessage(handle, WmNcLButtonDown, new IntPtr(ht), IntPtr.Zero);
+    }
+
+    void IThreeDActions.ThreeDMinimize() => WindowState = WindowState.Minimized;
+
+    void IThreeDActions.ThreeDMaximize() =>
+        WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
+
+    void IThreeDActions.ThreeDClose()
+    {
+        _exitRequested = true;
+        Close();
+    }
+
+    void IThreeDActions.ThreeDPlayTrack(string id)
+    {
+        var songId = id.StartsWith("track:", StringComparison.Ordinal) ? id[6..] : id;
+        var row = _songs.FirstOrDefault(x => x.Song.Id == songId);
+        if (row is null) return;
+        var index = _songs.IndexOf(row);
+        if (index >= 0) SelectSong(index, true);
+        _threeDHost.PushState();
+    }
+
+    void IThreeDActions.ThreeDOnSetting(string key, JsonElement? value)
+    {
+        if (value is null) return;
+        var v = value.Value;
+        try
+        {
+            switch (key)
+            {
+                case "quality": _threeDQuality = v.GetString() ?? _threeDQuality; break;
+                case "shelfMode": _threeDShelfMode = v.GetString() ?? _threeDShelfMode; break;
+                case "shelfPresence": _threeDShelfPresence = v.GetString() ?? _threeDShelfPresence; break;
+                case "cameraMode": _threeDCameraMode = v.GetString() ?? _threeDCameraMode; break;
+                case "libraryKind": _threeDLibraryKind = v.GetString() ?? _threeDLibraryKind; break;
+                case "coverPreset": _threeDCoverPreset = v.GetInt32(); break;
+                case "bloom": _threeDBloom = v.GetBoolean(); break;
+                case "lyrics": _threeDLyrics = v.GetBoolean(); break;
+                case "shelfSize": _threeDShelfSize = v.GetDouble(); break;
+                case "shelfOffsetX": _threeDShelfOffsetX = v.GetDouble(); break;
+                case "shelfOffsetY": _threeDShelfOffsetY = v.GetDouble(); break;
+                case "shelfAngleY": _threeDShelfAngleY = v.GetDouble(); break;
+                case "shelfOpacity": _threeDShelfOpacity = v.GetDouble(); break;
+                case "backgroundColor": _threeDBackgroundColor = v.GetString() ?? _threeDBackgroundColor; break;
+                case "particleSize": _threeDParticleSize = v.GetDouble(); break;
+                case "glow": _threeDGlow = v.GetDouble(); break;
+                case "particleCount": _threeDParticleCount = v.GetDouble(); break;
+                case "particleColorMode": _threeDParticleColorMode = v.GetInt32(); break;
+                case "particleColor": _threeDParticleColor = v.GetString() ?? ""; break;
+                default: return;
+            }
+            SaveSettings();
+        }
+        catch { }
     }
 
     /// <summary>Shows the lyric overlay above the CD (title at top, scrolling lyrics below).</summary>
@@ -1131,7 +1929,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
     };
 
     private Size? _preCdSize;
-    private double _preCdMinWidth = 680;
+    private double _preCdMinWidth = 340;
     private double _preCdMinHeight = 500;
 
     private void ApplyCdWindow(bool cd)
@@ -1175,6 +1973,8 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 
     private void Stage_PreviewMouseMove(object sender, MouseEventArgs e)
     {
+        if (IsVisualizerMode) ShowVisualizerControls();
+
         if (!_stageDragArmed || e.LeftButton != MouseButtonState.Pressed) return;
         var position = e.GetPosition(this);
         if (Math.Abs(position.X - _stageDragStart.X) < SystemParameters.MinimumHorizontalDragDistance &&
@@ -1186,6 +1986,49 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
     }
 
     private void Stage_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e) => _stageDragArmed = false;
+
+    /* ===================== cd mode disc zoom (wheel / pinch) ===================== */
+
+    private void Stage_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
+    {
+        if (!string.Equals(_displayMode, "cd", StringComparison.OrdinalIgnoreCase)) return;
+        var factor = e.Delta > 0 ? CdZoomStep : 1.0 / CdZoomStep;
+        SetCdZoom(_cdZoom * factor);
+        e.Handled = true;
+    }
+
+    private void Stage_ManipulationStarting(object sender, ManipulationStartingEventArgs e)
+    {
+        if (!string.Equals(_displayMode, "cd", StringComparison.OrdinalIgnoreCase))
+        {
+            e.Cancel();
+            return;
+        }
+        e.ManipulationContainer = Stage;
+        e.Mode = ManipulationModes.Scale;
+        e.Handled = true;
+    }
+
+    private void Stage_ManipulationDelta(object sender, ManipulationDeltaEventArgs e)
+    {
+        if (!string.Equals(_displayMode, "cd", StringComparison.OrdinalIgnoreCase)) return;
+        var s = e.DeltaManipulation.Scale;
+        var factor = (s.X + s.Y) / 2.0;
+        if (factor > 0.001) SetCdZoom(_cdZoom * factor);
+        e.Handled = true;
+    }
+
+    /// <summary>Applies a CD-mode zoom factor (clamped) and persists it.</summary>
+    private void SetCdZoom(double value)
+    {
+        var clamped = Math.Clamp(value, CdZoomMin, CdZoomMax);
+        if (Math.Abs(clamped - _cdZoom) < 0.0005) return;
+        _cdZoom = clamped;
+        UpdateDiscRotation();
+        SaveSettings();
+    }
+
+    private void CdResetZoom_Click(object sender, RoutedEventArgs e) => SetCdZoom(1.0);
 
     private void DiscPrev_Click(object sender, MouseButtonEventArgs e)
     {
@@ -1246,6 +2089,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
             menu.Items.Add(CreateModeMenuItem("normal", "普通模式"));
             menu.Items.Add(CreateModeMenuItem("cd", "CD 唱片模式"));
             menu.Items.Add(CreateModeMenuItem("visualizer", "音频可视化"));
+            menu.Items.Add(CreateModeMenuItem("mode3d", "3D 模式"));
             menu.Placement = PlacementMode.Bottom;
             menu.PlacementTarget = ViewModeButton;
             ViewModeButton.ContextMenu = menu;
@@ -1295,7 +2139,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 
     private void Play_Click(object sender, RoutedEventArgs e)
     {
-        if (_currentIndex < 0 && _songs.Count > 0) { SelectSong(0, true); return; }
+        if (_currentIndex < 0 && _currentOnline is null && _songs.Count > 0) { SelectSong(0, true); return; }
         if (_player.Snapshot.IsPlaying)
         {
             _player.Pause();
@@ -1323,6 +2167,13 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 
     private void AdvanceAfterEnded()
     {
+        if (_currentOnline is not null)
+        {
+            _player.Stop();
+            _currentOnline = null;
+            PlayGlyphText.Text = "\uE768";
+            return;
+        }
         if (_playbackMode == PlaybackMode.RepeatOne && _currentIndex >= 0)
         {
             _player.Seek(TimeSpan.Zero);
@@ -1375,7 +2226,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
     private void SongList_DoubleClick(object sender, MouseButtonEventArgs e)
     {
         if (sender is not ListBox list || list.SelectedItem is not SongRow row) return;
-        if (row.Online is not null) { _ = DownloadAndPlayAsync(row); return; }
+        if (row.Online is not null) { _ = PlayOnlineAsync(row); return; }
         var index = _songs.IndexOf(row);
         if (index >= 0) SelectSong(index, true);
     }
@@ -1405,6 +2256,13 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         var item = ItemsControl.ContainerFromElement(list, (DependencyObject)e.OriginalSource) as ListBoxItem;
         if (item?.DataContext is not SongRow row) return;
         list.SelectedItem = row;
+        if (row.Online is not null)
+        {
+            BuildOnlineContextMenu(list, row);
+            e.Handled = true;
+            return;
+        }
+        if (string.IsNullOrEmpty(row.Song.Id)) { e.Handled = true; return; }
         var menu = new ContextMenu();
         var favorite = new MenuItem { Header = row.IsFavorite ? "取消收藏" : "添加到收藏" };
         favorite.Click += (_, _) => ToggleFavorite(row);
@@ -1444,6 +2302,23 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         menu.PlacementTarget = list;
         menu.IsOpen = true;
         e.Handled = true;
+    }
+
+    private void BuildOnlineContextMenu(ListBox list, SongRow row)
+    {
+        var track = row.Online!;
+        var menu = new ContextMenu();
+        var audition = new MenuItem { Header = "在线试听" };
+        audition.Click += (_, _) => _ = PlayOnlineAsync(row);
+        menu.Items.Add(audition);
+        var download = new MenuItem { Header = "下载到本地", IsEnabled = track.Downloadable };
+        download.Click += (_, _) => _ = DownloadOnlineAsync(row, false);
+        menu.Items.Add(download);
+        var downloadPlay = new MenuItem { Header = "下载并播放", IsEnabled = track.Downloadable };
+        downloadPlay.Click += (_, _) => _ = DownloadOnlineAsync(row, true);
+        menu.Items.Add(downloadPlay);
+        menu.PlacementTarget = list;
+        menu.IsOpen = true;
     }
 
     private void ToggleFavorite(SongRow row)
@@ -1559,6 +2434,21 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         };
         QualityChip.Background = (Brush)FindResource(bg);
         QualityText.Foreground = (Brush)FindResource(fg);
+
+        // The visualizer backdrop is always dark, so colour the quality text with the
+        // fixed dark-palette accents instead of the theme-swapped quality brushes.
+        VizQualityText.Text = quality;
+        var vizColor = quality switch
+        {
+            "高清" => Color.FromRgb(0x8F, 0xB8, 0xFF),
+            "无损" => Color.FromRgb(0x6E, 0xE7, 0xB7),
+            "Hi-Res" => Color.FromRgb(0xFC, 0xD3, 0x4D),
+            "在线·可下载" or "在线·试听" => Color.FromRgb(0xA9, 0xBB, 0xFF),
+            _ => Color.FromRgb(0xB9, 0xC0, 0xD0)
+        };
+        var vizBrush = new SolidColorBrush(vizColor);
+        vizBrush.Freeze();
+        VizQualityText.Foreground = vizBrush;
     }
 
     /* ===================== volume / progress ===================== */
@@ -1569,6 +2459,71 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
     {
         _player.SetVolume(e.NewValue);
         if (VolumeText is not null) VolumeText.Text = $"{e.NewValue:P0}";
+    }
+
+    /* ===================== visualizer style switch ===================== */
+
+    private void VizStyle_Click(object sender, RoutedEventArgs e)
+    {
+        RebuildVizStyleMenu();
+        VizStylePopup.IsOpen = true;
+    }
+
+    /// <summary>Builds the popup list from the renderers currently registered in the engine.</summary>
+    private void RebuildVizStyleMenu()
+    {
+        VizStylePanel.Children.Clear();
+        var iconFont = (FontFamily)FindResource("IconFont");
+        var checkBrush = (Brush)FindResource("AccentFillColorDefaultBrush");
+        var textBrush = (Brush)FindResource("TextFillColorPrimaryBrush");
+
+        foreach (var r in _visualizerEngine.AllRenderers)
+        {
+            bool active = string.Equals(r.StyleId, _visualizerStyle, StringComparison.OrdinalIgnoreCase);
+
+            var row = new StackPanel { Orientation = Orientation.Horizontal };
+            row.Children.Add(new TextBlock
+            {
+                Text = "\uE73E",
+                FontFamily = iconFont,
+                FontSize = 12,
+                Width = 22,
+                VerticalAlignment = VerticalAlignment.Center,
+                Foreground = active ? checkBrush : Brushes.Transparent,
+            });
+            row.Children.Add(new TextBlock
+            {
+                Text = r.DisplayName,
+                FontSize = 13,
+                VerticalAlignment = VerticalAlignment.Center,
+                Foreground = textBrush,
+                FontWeight = active ? FontWeights.SemiBold : FontWeights.Normal,
+            });
+
+            var item = new Wpf.Ui.Controls.Button
+            {
+                Content = row,
+                Appearance = Wpf.Ui.Controls.ControlAppearance.Transparent,
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                HorizontalContentAlignment = HorizontalAlignment.Left,
+                Padding = new Thickness(8, 6, 14, 6),
+                Margin = new Thickness(0, 1, 0, 1),
+            };
+            string id = r.StyleId;
+            item.Click += (_, _) =>
+            {
+                _visualizerStyle = id;
+                _visualizerEngine.SetStyle(id);
+                SaveSettings();
+                RebuildVizStyleMenu();
+                VizStylePopup.IsOpen = false;
+            };
+            VizStylePanel.Children.Add(item);
+        }
+
+        var current = _visualizerEngine.AllRenderers
+            .FirstOrDefault(r => string.Equals(r.StyleId, _visualizerStyle, StringComparison.OrdinalIgnoreCase));
+        VizStyleButton.ToolTip = current is null ? "可视化风格" : $"可视化风格：{current.DisplayName}";
     }
 
     private void Progress_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
@@ -1601,6 +2556,28 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 
     private void FetchLyrics_Click(object sender, RoutedEventArgs e) => _ = RefreshOnlineLyricsAsync();
 
+    private void LyricsMenu_Opened(object sender, RoutedEventArgs e)
+    {
+        if (sender is not ContextMenu menu) return;
+        foreach (var entry in menu.Items)
+            if (entry is MenuItem item && (item.Header as string)?.Contains("歌词") == true)
+                item.IsEnabled = _currentIndex >= 0;
+    }
+
+    /// <summary>Right-click "返回播放页面": leaves the lyrics view in both page and visualizer modes.</summary>
+    private void BackToPlayback_Click(object sender, RoutedEventArgs e)
+    {
+        if (IsVisualizerMode && _vizLyrics)
+        {
+            _vizLyrics = false;
+            ApplyVisualizerLyrics();
+            SaveSettings();
+            return;
+        }
+        _page = null;
+        ApplyPage();
+    }
+
     private async Task RefreshOnlineLyricsAsync()
     {
         if (_currentIndex < 0) return;
@@ -1619,7 +2596,8 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         _lyricLines.Clear();
         if (_currentIndex < 0) return;
         var song = _songs[_currentIndex].Song;
-        LyricsHead.Text = $"{song.Title} · {song.Artist}";
+        LyricsHead.Text = song.Title;
+        LyricsSub.Text = song.Artist;
         var lrc = Path.ChangeExtension(song.Path, ".lrc");
         var lines = File.Exists(lrc) ? LrcParser.Parse(ReadTextAuto(lrc)) : _lyricsProvider.ReadCache(song.Id);
         if (lines.Count == 0)
@@ -1650,8 +2628,10 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
     {
         LyricsPanel.Children.Clear();
         CdLyricsPanel.Children.Clear();
+        VizLyricsPanel.Children.Clear();
         _lyricBlocks.Clear();
         _cdLyricBlocks.Clear();
+        _vizLyricBlocks.Clear();
         _lastLyricIndex = -1;
     }
 
@@ -1661,7 +2641,9 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         {
             _lyricBlocks.Add(CreateLyricBlock(line, LyricsPanel));
             _cdLyricBlocks.Add(CreateLyricBlock(line, CdLyricsPanel));
+            _vizLyricBlocks.Add(CreateLyricBlock(line, VizLyricsPanel));
         }
+        _threeDHost.PushLyrics();
     }
 
     private TextBlock CreateLyricBlock(LyricLine line, Panel host)
@@ -1672,7 +2654,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         var block = new TextBlock
         {
             Text = line.Text,
-            Foreground = ResBrush("TextMutedBrush"),
+            Foreground = ReferenceEquals(host, VizLyricsPanel) ? VizLyricInactiveBrush : ResBrush("TextMutedBrush"),
             FontFamily = family,
             FontSize = _lyricsFontSize,
             Margin = new Thickness(8, 2, 8, 2),
@@ -1710,20 +2692,25 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         for (var i = 0; i < _lyricLines.Count; i++) if (_lyricLines[i].TimeMs <= position) current = i;
         var activeBrush = _lyricActiveColor is { } activeColor ? new SolidColorBrush(activeColor) : ResBrush("AccentBrush");
         var inactiveBrush = _lyricInactiveColor is { } inactiveColor ? new SolidColorBrush(inactiveColor) : ResBrush("TextMutedBrush");
+        var vizInactiveBrush = _lyricInactiveColor is { } vizColor ? new SolidColorBrush(vizColor) : VizLyricInactiveBrush;
         for (var i = 0; i < _lyricBlocks.Count; i++)
         {
             var active = i == current;
             StyleLyricBlock(_lyricBlocks[i], active, activeBrush, inactiveBrush);
             if (i < _cdLyricBlocks.Count) StyleLyricBlock(_cdLyricBlocks[i], active, activeBrush, inactiveBrush);
+            if (i < _vizLyricBlocks.Count) StyleLyricBlock(_vizLyricBlocks[i], active, activeBrush, vizInactiveBrush);
         }
 
         var changed = force || current != _lastLyricIndex;
         _lastLyricIndex = current;
         if (!changed) return;
+        _threeDHost.PushLyricIndex();
         if (current < _lyricBlocks.Count && LyricsPage.Visibility == Visibility.Visible)
             CenterActiveLyric(LyricsView, _lyricBlocks[current]);
         if (current < _cdLyricBlocks.Count && CdLyricsOverlay.Visibility == Visibility.Visible)
             CenterActiveLyric(CdLyricsView, _cdLyricBlocks[current]);
+        if (current < _vizLyricBlocks.Count && VisualizerLyricsOverlay.Visibility == Visibility.Visible)
+            CenterActiveLyric(VizLyricsView, _vizLyricBlocks[current]);
     }
 
     /* ===================== equalizer ===================== */
@@ -1737,21 +2724,30 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 
     private static readonly string[] EqBandFrequencies = { "80", "125", "250", "500", "1k", "2k", "4k", "8k", "12k", "16k" };
 
-    private void Eq_Click(object sender, RoutedEventArgs e)
+    /// <summary>Builds the equalizer settings card (enable switch, 10 bands and presets).</summary>
+    private UIElement BuildEqPanel()
     {
-        EqPopup.IsOpen = true;
-        if (EqBandsPanel.Items.Count == 0) BuildEqPanel();
-        EqEnableToggle.IsChecked = _eqEnabled;
-        EqEnableToggle.Content = _eqEnabled ? "开启" : "关闭";
-    }
+        var root = new StackPanel();
 
-    private void EqEnable_Click(object sender, RoutedEventArgs e)
-    {
-        _eqEnabled = EqEnableToggle.IsChecked == true;
-        EqEnableToggle.Content = _eqEnabled ? "开启" : "关闭";
-        ApplyEqToEngine();
-        SaveSettings();
-        UpdateEqBandSlidersEnabled();
+        _eqEnableToggle = new ToggleButton { Style = (Style)FindResource("SwitchToggle"), IsChecked = _eqEnabled };
+        _eqEnableToggle.Click += (_, _) =>
+        {
+            _eqEnabled = _eqEnableToggle.IsChecked == true;
+            ApplyEqToEngine();
+            UpdateEqBandSlidersEnabled();
+            SaveSettings();
+        };
+        root.Children.Add(Field("启用均衡器", "仅作用于播放输出，不修改源文件", _eqEnableToggle));
+
+        var bands = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 14, 0, 0) };
+        BuildEqBands(bands);
+        root.Children.Add(bands);
+
+        var presets = new WrapPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 14, 0, 0) };
+        BuildEqPresets(presets);
+        root.Children.Add(presets);
+
+        return root;
     }
 
     private void UpdateEqBandSlidersEnabled()
@@ -1759,15 +2755,15 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         foreach (var slider in _eqSliders) slider.IsEnabled = _eqEnabled;
     }
 
-    private void BuildEqPanel()
+    private void BuildEqBands(Panel host)
     {
-        EqBandsPanel.Items.Clear();
+        host.Children.Clear();
         _eqSliders.Clear();
         _eqGainTexts.Clear();
         for (var band = 0; band < _eqGains.Length; band++)
         {
             var gain = _eqGains[band];
-            var column = new StackPanel { Orientation = Orientation.Vertical, Width = 28, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 0, 6, 0) };
+            var column = new StackPanel { Orientation = Orientation.Vertical, Width = 34, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 0, 8, 0) };
             if (band == _eqGains.Length - 1) column.Margin = new Thickness(0, 0, 0, 0);
 
             var gainText = new TextBlock
@@ -1816,11 +2812,14 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
             column.Children.Add(gainText);
             column.Children.Add(slider);
             column.Children.Add(freqText);
-            EqBandsPanel.Items.Add(column);
+            host.Children.Add(column);
         }
+    }
 
+    private void BuildEqPresets(Panel host)
+    {
+        host.Children.Clear();
         // Preset buttons
-        EqPresetsPanel.Children.Clear();
         var presets = new (string Name, double[] Gains)[]
         {
             ("Flat", new double[10]),
@@ -1852,7 +2851,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
                 Style = (Style)FindResource("GhostButton")
             };
             btn.Click += (_, _) => ApplyEqPreset(gains);
-            EqPresetsPanel.Children.Add(btn);
+            host.Children.Add(btn);
         }
     }
 
@@ -1870,10 +2869,8 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         _suppressEqSave = true;
         try
         {
-            EqEnableToggle.IsChecked = true;
-            EqEnableToggle.Content = "开启";
-            UpdateEqBandSlidersEnabled();
-            for (var i = 0; i < _eqGains.Length && i < _eqSliders.Count; i++)
+            if (_eqEnableToggle is not null) _eqEnableToggle.IsChecked = true;
+            UpdateEqBandSlidersEnabled();            for (var i = 0; i < _eqGains.Length && i < _eqSliders.Count; i++)
             {
                 _eqSliders[i].Value = _eqGains[i];
                 _eqGainTexts[i].Text = $"{_eqGains[i]:0}";
@@ -1924,21 +2921,72 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 
     private void Search_TextChanged(object sender, TextChangedEventArgs e)
     {
-        if (_onlineMode) QueueOnlineSearch();
-        else RenderLibrary();
+        // Online search is explicit (button / Enter) — typing must not fire a request.
+        if (_onlineMode) return;
+        RenderLibrary();
     }
 
-    private void Online_Click(object sender, RoutedEventArgs e)
+    private void SearchBox_KeyDown(object sender, KeyEventArgs e)
     {
-        _onlineMode = !_onlineMode;
-        UpdateOnlineButton();
-        if (_onlineMode) QueueOnlineSearch();
-        else { _onlineResults.Clear(); RenderLibrary(); }
+        if (e.Key == Key.Enter && _onlineMode)
+        {
+            QueueOnlineSearch();
+            e.Handled = true;
+        }
     }
+
+    private void OnlineSearchButton_Click(object sender, RoutedEventArgs e) => QueueOnlineSearch();
 
     private void UpdateOnlineButton()
     {
-        OnlineButton.IsChecked = _onlineMode;
+        OnlineSourceBox.Visibility = _onlineMode ? Visibility.Visible : Visibility.Collapsed;
+        OnlineSearchButton.Visibility = _onlineMode ? Visibility.Visible : Visibility.Collapsed;
+        LibraryTabs.Visibility = _onlineMode ? Visibility.Collapsed : Visibility.Visible;
+        LibraryTitle.Text = _onlineMode ? "在线音乐库" : "音乐库";
+        SearchBox.PlaceholderText = _onlineMode ? "输入关键词后点击搜索" : "搜索";
+        if (!_onlineMode) SetOnlineSearching(false);
+    }
+
+    private void PopulateOnlineSources()
+    {
+        OnlineSourceBox.Items.Clear();
+        OnlineSourceBox.Items.Add(new ComboBoxItem { Content = "全部", Tag = OnlineMusicService.AllProviders });
+        foreach (var provider in _online.Providers)
+            OnlineSourceBox.Items.Add(new ComboBoxItem { Content = provider.DisplayName, Tag = provider.Key });
+        SelectOnlineSource(_onlineProvider);
+    }
+
+    private void SelectOnlineSource(string key)
+    {
+        _suppressOnlineSourceEvent = true;
+        try
+        {
+            foreach (var item in OnlineSourceBox.Items.OfType<ComboBoxItem>())
+            {
+                if (string.Equals(item.Tag as string, key, StringComparison.OrdinalIgnoreCase))
+                {
+                    OnlineSourceBox.SelectedItem = item;
+                    return;
+                }
+            }
+            if (OnlineSourceBox.Items.Count > 0) OnlineSourceBox.SelectedIndex = 0;
+        }
+        finally { _suppressOnlineSourceEvent = false; }
+    }
+
+    private void OnlineSource_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressOnlineSourceEvent || OnlineSourceBox.SelectedItem is not ComboBoxItem item) return;
+        _onlineProvider = item.Tag as string ?? OnlineMusicService.AllProviders;
+        SaveSettings();
+    }
+
+    private void ConfigureOnlineProviders()
+    {
+        _jamendo.ClientId = _jamendoClientId;
+        _gdStudio.Source = _gdSource;
+        _gdStudio.Bitrate = _gdBitrate;
+        _audius.AppName = string.IsNullOrWhiteSpace(_audiusAppName) ? "XstarMusic" : _audiusAppName;
     }
 
     private void QueueOnlineSearch()
@@ -1946,94 +2994,285 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         _onlineSearch?.Cancel();
         var cts = new CancellationTokenSource();
         _onlineSearch = cts;
-        _ = OnlineSearchAsync(cts.Token);
+        var generation = ++_onlineSearchGeneration;
+        _ = OnlineSearchAsync(cts.Token, generation);
     }
 
-    private async Task OnlineSearchAsync(CancellationToken cancellationToken)
+    private void SetOnlineSearching(bool searching)
+    {
+        var visibility = searching ? Visibility.Visible : Visibility.Collapsed;
+        OnlineSearchRing.Visibility = visibility;
+        OnlineSearchStatus.Visibility = visibility;
+    }
+
+    private async Task OnlineSearchAsync(CancellationToken cancellationToken, int generation)
     {
         var query = SearchBox.Text.Trim();
-        if (string.IsNullOrWhiteSpace(_jamendoClientId))
-        {
-            _onlineResults.Clear();
-            _onlineResults.Add(new SongRow(new Song { Title = "未配置在线音源", Artist = "请在设置中填写 Jamendo client_id" }, 1));
-            RenderLibrary();
-            return;
-        }
-        if (query.Length < 2)
-        {
-            _onlineResults.Clear();
-            RenderLibrary();
-            return;
-        }
+        if (_onlineMode && query.Length >= 1) ShowSearchingPlaceholder(query, generation);
+
         try
         {
-            await Task.Delay(450, cancellationToken);
-            var tracks = await _jamendo.SearchAsync(query, cancellationToken);
+            if (query.Length < 1)
+            {
+                _onlineResults.Clear();
+                _onlineResults.Add(new SongRow(new Song { Title = "在线音乐库", Artist = "输入关键词后点击「搜索」" }, 1) { IsStatus = true });
+                RenderLibrary();
+                return;
+            }
+
+            var selected = _online.Find(_onlineProvider);
+            if (selected is not null && !selected.IsConfigured)
+            {
+                _onlineResults.Clear();
+                _onlineResults.Add(new SongRow(new Song { Title = "音源未配置", Artist = $"请先在设置中完成 {selected.DisplayName} 的配置" }, 1) { IsStatus = true });
+                RenderLibrary();
+                return;
+            }
+
+            await Task.Delay(350, cancellationToken);
+            var tracks = await _online.SearchAsync(query, _onlineProvider, cancellationToken);
             if (cancellationToken.IsCancellationRequested) return;
             _onlineResults.Clear();
             var index = 1;
             foreach (var track in tracks)
             {
-                var song = new Song { Id = track.Id, Title = track.Title, Artist = track.Artist, Album = track.Album, DurationMs = track.DurationMs, Format = "MP3", Quality = track.Downloadable ? "在线·可下载" : "在线·试听" };
+                var source = _online.Find(track.ProviderKey)?.DisplayName ?? "在线";
+                var song = new Song
+                {
+                    Id = track.Id,
+                    Title = track.Title,
+                    Artist = track.Artist,
+                    Album = track.Album,
+                    DurationMs = track.DurationMs,
+                    Format = source,
+                    Quality = track.Downloadable ? "在线·可下载" : "在线·试听"
+                };
                 _onlineResults.Add(new SongRow(song, index++) { Online = track });
             }
-            if (_onlineResults.Count == 0) _onlineResults.Add(new SongRow(new Song { Title = "无搜索结果", Artist = query }, 1));
+            if (_onlineResults.Count == 0) _onlineResults.Add(new SongRow(new Song { Title = "无搜索结果", Artist = query }, 1) { IsStatus = true });
             RenderLibrary();
         }
         catch (OperationCanceledException) { }
-        catch (Exception ex) { Toast("在线搜索失败：" + ex.Message); }
+        catch (Exception ex)
+        {
+            if (generation == _onlineSearchGeneration) Toast("在线搜索失败：" + ex.Message);
+        }
+        finally
+        {
+            if (generation == _onlineSearchGeneration) SetOnlineSearching(false);
+        }
     }
 
-    private async Task DownloadAndPlayAsync(SongRow row)
+    /// <summary>Shows an inline "搜索中…" row plus the header spinner while a request is in flight.</summary>
+    private void ShowSearchingPlaceholder(string query, int generation)
     {
-        var track = row.Online!;
-        if (string.IsNullOrWhiteSpace(_jamendoClientId)) { Toast("请先在设置中填写 Jamendo client_id"); return; }
-        var folder = string.IsNullOrWhiteSpace(_downloadFolder) ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyMusic), "XSTAR") : _downloadFolder;
+        if (generation != _onlineSearchGeneration) return;
+        SetOnlineSearching(true);
+        _onlineResults.Clear();
+        _onlineResults.Add(new SongRow(new Song { Title = "搜索中…", Artist = query }, 1) { IsStatus = true });
+        RenderLibrary();
+    }
+
+    /// <summary>Streams an online track through the player engine, falling back to a cached copy.</summary>
+    private async Task PlayOnlineAsync(SongRow row)
+    {
+        if (row.Online is not { } track) return;
+        try
+        {
+            var url = await _online.ResolveStreamUrlAsync(track);
+            if (string.IsNullOrWhiteSpace(url))
+            {
+                Toast($"无法播放「{track.Title}」：暂无可用音源（可能受版权或地区限制）");
+                return;
+            }
+
+            var quality = row.Song.Quality;
+            var song = BuildOnlineSong(track, url, quality);
+
+            _currentIndex = -1;
+            _currentOnline = song;
+            _database.AddHistory(song.Id, DateTime.UtcNow.Ticks);
+            UpdateNowPlayingUi(song);
+            _lyricLines.Clear();
+            RenderLyrics();
+
+            _suppressPlaybackError = true;
+            var opened = _player.Load(song);
+            _suppressPlaybackError = false;
+
+            if (!opened)
+            {
+                // Some sources block direct streaming (hotlink protection); cache and play locally.
+                var cached = await CacheOnlineAsync(track);
+                if (cached is null)
+                {
+                    Toast($"无法播放「{track.Title}」：该音源暂时不可用");
+                    PlayGlyphText.Text = "\uE768";
+                    return;
+                }
+                song = BuildOnlineSong(track, cached, quality);
+                _currentOnline = song;
+                _player.Load(song);
+            }
+
+            _player.Play();
+            PlayGlyphText.Text = "\uE769";
+            AnimateNowPlaying();
+            _timer.Start();
+            UpdateDiscRotation();
+        }
+        catch (Exception ex) { Toast("在线播放失败：" + ex.Message); }
+    }
+
+    private Song BuildOnlineSong(OnlineTrack track, string path, string quality) => new()
+    {
+        Id = track.Id,
+        Path = path,
+        Title = track.Title,
+        Artist = track.Artist,
+        Album = track.Album,
+        DurationMs = track.DurationMs,
+        Format = _online.Find(track.ProviderKey)?.DisplayName ?? "在线",
+        Quality = quality
+    };
+
+    private async Task<string?> CacheOnlineAsync(OnlineTrack track)
+    {
+        try
+        {
+            var cacheDirectory = Path.Combine(_dataDirectory, "online-cache");
+            return await _online.DownloadAsync(track, cacheDirectory);
+        }
+        catch { return null; }
+    }
+
+    private void OnlineAudition_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button { Tag: SongRow row } && row.Online is not null) _ = PlayOnlineAsync(row);
+    }
+
+    private void OnlineDownload_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button { Tag: SongRow row } && row.Online is not null) _ = DownloadOnlineAsync(row, false);
+    }
+
+    private async Task DownloadOnlineAsync(SongRow row, bool playAfter)
+    {
+        if (row.Online is not { } track) return;
+        if (!EnsureDownloadFolder()) return;
+
+        var folder = _downloadFolder;
         try
         {
             Toast($"开始下载：{track.Artist} - {track.Title}");
-            var path = await _jamendo.DownloadAsync(track, folder);
-            if (!_folders.Contains(folder, StringComparer.OrdinalIgnoreCase)) { _folders.Add(folder); SaveSettings(); }
+            var path = await _online.DownloadAsync(track, folder);
             _onlineMode = false;
             UpdateOnlineButton();
             await ScanAsync();
-            var index = _songs.ToList().FindIndex(r => r.Song.Path.Equals(path, StringComparison.OrdinalIgnoreCase));
-            if (index >= 0) SelectSong(index, true);
+            if (playAfter)
+            {
+                var index = _songs.ToList().FindIndex(r => r.Song.Path.Equals(path, StringComparison.OrdinalIgnoreCase));
+                if (index >= 0) SelectSong(index, true);
+            }
             Toast("下载完成：" + Path.GetFileName(path));
         }
         catch (Exception ex) { Toast("下载失败：" + ex.Message); }
+    }
+
+    /// <summary>
+    /// Ensures a download folder is configured. When none is set it fills in a default, registers
+    /// it as a scanned music folder and opens Settings → 在线 so the user can confirm or change it.
+    /// Returns false when the caller should abort the download.
+    /// </summary>
+    private bool EnsureDownloadFolder()
+    {
+        if (!string.IsNullOrWhiteSpace(_downloadFolder))
+        {
+            RegisterDownloadFolder(_downloadFolder);
+            return true;
+        }
+
+        var fallback = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyMusic), "XSTAR");
+        _downloadFolder = fallback;
+        RegisterDownloadFolder(fallback, scan: true);
+        SaveSettings();
+        OpenOnlineSettings();
+        Toast($"尚未设置下载目录，已默认使用：\n{fallback}\n\n该目录已加入扫描文件夹，可在「设置 → 在线」中修改后重新下载。");
+        return false;
+    }
+
+    private void OpenOnlineSettings()
+    {
+        OpenSettings();
+        BuildSettings("online");
+    }
+
+    /// <summary>Adds the download folder to the scanned library folders so downloads get indexed.</summary>
+    private void RegisterDownloadFolder(string folder, bool scan = false)
+    {
+        if (string.IsNullOrWhiteSpace(folder)) return;
+        try { Directory.CreateDirectory(folder); } catch { return; }
+        if (_folders.Contains(folder, StringComparer.OrdinalIgnoreCase)) return;
+        _folders.Add(folder);
+        ConfigureWatchers();
+        SaveSettings();
+        if (scan) _ = ScanAsync();
     }
 
     /* ===================== overlays ===================== */
 
     private void Library_Click(object sender, RoutedEventArgs e)
     {
-        ShowOverlay(library: true);
-        RenderLibrary();
+        var menu = LibraryButton.ContextMenu;
+        if (menu is null) { MyLibrary_Click(sender, e); return; }
+        menu.PlacementTarget = LibraryButton;
+        menu.Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom;
+        menu.HorizontalOffset = -60;
+        menu.IsOpen = true;
+    }
+
+    private void MyLibrary_Click(object sender, RoutedEventArgs e) => OpenLibrary(online: false);
+
+    private void OnlineLibrary_Click(object sender, RoutedEventArgs e) => OpenLibrary(online: true);
+
+    /// <summary>Opens 我的音乐库 / 在线音乐库 as a full page, styled like the playlist page.</summary>
+    private void OpenLibrary(bool online)
+    {
+        _onlineMode = online;
+        SettingsOverlay.Visibility = Visibility.Collapsed;
+        SearchBox.Text = "";
+        if (online && _onlineResults.Count == 0)
+            _onlineResults.Add(new SongRow(new Song { Title = "在线音乐库", Artist = "输入关键词后点击「搜索」" }, 1) { IsStatus = true });
+        _page = online ? "online" : "library";
+        Stage.Visibility = Visibility.Visible;
+        UpdateOnlineButton();
+        ApplyPage();
+        SyncTitleBarBackdrop();
+    }
+
+    private void LibraryClose_Click(object sender, RoutedEventArgs e)
+    {
+        _page = null;
+        ApplyPage();
     }
 
     private void Settings_Click(object sender, RoutedEventArgs e)
     {
-        ShowOverlay(library: false);
+        OpenSettings();
         BuildSettings(_settingsSection);
     }
 
-    /// <summary>Opens one top-level overlay and closes every other panel (page + overlays).</summary>
-    private void ShowOverlay(bool library)
+    /// <summary>Opens the settings overlay, hiding the stage.</summary>
+    private void OpenSettings()
     {
         _page = null;
         ApplyPage();
-        LibraryOverlay.Visibility = library ? Visibility.Visible : Visibility.Collapsed;
-        SettingsOverlay.Visibility = library ? Visibility.Collapsed : Visibility.Visible;
+        SettingsOverlay.Visibility = Visibility.Visible;
         Stage.Visibility = Visibility.Collapsed;
         SyncTitleBarBackdrop();
     }
 
-    private void CloseOverlays()
-    {
-        LibraryOverlay.Visibility = Visibility.Collapsed;
-        SettingsOverlay.Visibility = Visibility.Collapsed;
-    }
+    private void CloseOverlays() => SettingsOverlay.Visibility = Visibility.Collapsed;
 
     private void CloseOverlays_Click(object sender, RoutedEventArgs e)
     {
@@ -2045,7 +3284,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
     /// <summary>Match the title bar to the ambient page, or to the opaque overlay when one is open.</summary>
     private void SyncTitleBarBackdrop()
     {
-        var overlayOpen = LibraryOverlay.Visibility == Visibility.Visible || SettingsOverlay.Visibility == Visibility.Visible;
+        var overlayOpen = SettingsOverlay.Visibility == Visibility.Visible;
         TitleBarControl.Background = overlayOpen
             ? (TryFindResource("ApplicationBackgroundBrush") as Brush ?? Brushes.Transparent)
             : Brushes.Transparent;
@@ -2157,9 +3396,11 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         return toggle;
     }
 
-    private StackPanel Segment(string[] labels, int selected, Action<int> onSelect)
+    private Panel Segment(string[] labels, int selected, Action<int> onSelect, bool wrap = false)
     {
-        var host = new StackPanel { Orientation = Orientation.Horizontal };
+        Panel host = wrap
+            ? new WrapPanel { Orientation = Orientation.Horizontal }
+            : new StackPanel { Orientation = Orientation.Horizontal };
         var buttons = new List<Button>();
         for (var i = 0; i < labels.Length; i++)
         {
@@ -2247,7 +3488,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         SettingsBody.Children.Add(Card("音乐文件夹", stack));
 
         var browse = new Button { Content = "打开音乐库", Style = (Style)FindResource("GhostButton"), Padding = new Thickness(14, 8, 14, 8) };
-        browse.Click += (_, _) => Library_Click(this, new RoutedEventArgs());
+        browse.Click += (_, _) => MyLibrary_Click(this, new RoutedEventArgs());
         var browsePanel = new StackPanel();
         browsePanel.Children.Add(new TextBlock { Text = "浏览歌曲 / 专辑 / 艺术家 / 收藏 / 最近", Foreground = ResBrush("TextMutedBrush"), FontSize = 12, Margin = new Thickness(0, 0, 0, 10) });
         browsePanel.Children.Add(browse);
@@ -2303,8 +3544,10 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 
         var disc = new StackPanel();
         disc.Children.Add(Field("唱片旋转", "播放时缓慢旋转光碟", Switch(_discRotation, value => { _discRotation = value; SaveSettings(); UpdateDiscRotation(); })));
-        disc.Children.Add(SliderRow("光碟大小", "播放页中央光碟的显示比例", 0.8, 1.5, 0.05, _discSize,
+        disc.Children.Add(SliderRow("光碟大小", "普通模式下光碟的显示比例（CD 模式请用滚轮缩放）", 0.8, 1.5, 0.05, _discSize,
             v => $"{v * 100:0}%", value => { _discSize = value; SaveSettings(); UpdateDiscRotation(); }));
+        disc.Children.Add(SliderRow("CD 缩放", "CD 模式唱片大小（窗口内滚轮 / 双指缩放，100% 填满窗口）", CdZoomMin * 100, CdZoomMax * 100, 5, _cdZoom * 100,
+            v => $"{v:0}%", value => { SetCdZoom(value / 100.0); }));
         disc.Children.Add(SliderRow("转动速度", "数值越小转得越快（秒 / 圈）", 4, 60, 1, _discSpeed,
             v => $"{v:0} 秒/圈", value => { _discSpeed = value; SaveSettings(); UpdateDiscRotation(); }));
         SettingsBody.Children.Add(Card("唱片", disc));
@@ -2312,6 +3555,12 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         var window = new StackPanel();
         window.Children.Add(SliderRow("窗口透明度", "数值越大越透明（可透出桌面），100% 时完全隐藏，可由托盘恢复", 0.0, 1.0, 0.05, Math.Round(1.0 - _windowOpacity, 2),
             v => $"{v * 100:0}%", value => { ApplyWindowOpacity(1.0 - value); SaveSettings(); }));
+        window.Children.Add(Field("隐藏标题栏 LOGO 与标题", "隐藏窗口左上角的图标和「XSTAR」文字", Switch(_hideTitleBrand, value =>
+        {
+            _hideTitleBrand = value;
+            ApplyTitleBrand();
+            SaveSettings();
+        })));
         SettingsBody.Children.Add(Card("窗口", window));
 
         // Visualizer settings
@@ -2325,12 +3574,11 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
             _visualizerStyle = styleIds[index];
             _visualizerEngine.SetStyle(_visualizerStyle);
             SaveSettings();
-        })));
+        }, wrap: true)));
         vizPanel.Children.Add(Field("显示歌曲信息叠加层", "可视化模式下在底部显示标题/艺术家", Switch(_visualizerShowInfo, value =>
         {
             _visualizerShowInfo = value;
-            if (string.Equals(_displayMode, "visualizer", StringComparison.OrdinalIgnoreCase))
-                VisualizerInfoOverlay.Visibility = value ? Visibility.Visible : Visibility.Collapsed;
+            UpdateVisualizerInfoOverlay();
             SaveSettings();
         })));
         SettingsBody.Children.Add(Card("可视化", vizPanel));
@@ -2448,6 +3696,8 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         panel.Children.Add(Field("启动时恢复上次现场", "队列、进度与播放状态", Switch(true, _ => { })));
         panel.Children.Add(Field("淡入淡出", "切歌与暂停时平滑过渡", Switch(true, _ => { })));
         SettingsBody.Children.Add(Card("播放", panel));
+
+        SettingsBody.Children.Add(Card("均衡器", BuildEqPanel()));
     }
 
     private void BuildLyricsSettings()
@@ -2551,26 +3801,93 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
             ? $"#{color.R:X2}{color.G:X2}{color.B:X2}"
             : $"#{color.A:X2}{color.R:X2}{color.G:X2}{color.B:X2}";
 
+    private static readonly (string Label, string Value)[] GdSources =
+    {
+        ("网易云", "netease"), ("QQ音乐", "tencent"), ("酷狗", "kugou"), ("酷我", "kuwo"),
+        ("咪咕", "migu"), ("Tidal", "tidal"), ("Qobuz", "qobuz"), ("Spotify", "spotify"),
+        ("YouTube Music", "ytmusic"), ("Apple Music", "apple")
+    };
+
+    private static readonly (string Label, int Value)[] GdBitrates =
+    {
+        ("128K", 128), ("192K", 192), ("320K", 320), ("无损", 740), ("Hi-Res", 999)
+    };
+
     private void BuildOnline()
     {
         var panel = new StackPanel();
-        panel.Children.Add(Field("在线搜索", "Jamendo 免费音乐（需要 client_id）", Switch(!string.IsNullOrWhiteSpace(_jamendoClientId), _ => { })));
+
+        var providerCombo = new ComboBox { Width = 180, VerticalContentAlignment = VerticalAlignment.Center };
+        providerCombo.Items.Add(new ComboBoxItem { Content = "全部音源", Tag = OnlineMusicService.AllProviders });
+        foreach (var provider in _online.Providers)
+            providerCombo.Items.Add(new ComboBoxItem { Content = provider.DisplayName, Tag = provider.Key });
+        foreach (var item in providerCombo.Items.OfType<ComboBoxItem>())
+            if (string.Equals(item.Tag as string, _onlineProvider, StringComparison.OrdinalIgnoreCase)) providerCombo.SelectedItem = item;
+        if (providerCombo.SelectedItem is null && providerCombo.Items.Count > 0) providerCombo.SelectedIndex = 0;
+        providerCombo.SelectionChanged += (_, _) =>
+        {
+            if (providerCombo.SelectedItem is not ComboBoxItem chosen) return;
+            _onlineProvider = chosen.Tag as string ?? OnlineMusicService.AllProviders;
+            SelectOnlineSource(_onlineProvider);
+            SaveSettings();
+        };
+        panel.Children.Add(Field("默认音源", "在线搜索使用的音源，「全部」会合并多源结果", providerCombo));
+
+        var gdSourceCombo = new ComboBox { Width = 160, VerticalContentAlignment = VerticalAlignment.Center };
+        foreach (var (label, value) in GdSources)
+            gdSourceCombo.Items.Add(new ComboBoxItem { Content = label, Tag = value });
+        foreach (var item in gdSourceCombo.Items.OfType<ComboBoxItem>())
+            if (string.Equals(item.Tag as string, _gdSource, StringComparison.OrdinalIgnoreCase)) gdSourceCombo.SelectedItem = item;
+        if (gdSourceCombo.SelectedItem is null && gdSourceCombo.Items.Count > 0) gdSourceCombo.SelectedIndex = 0;
+        gdSourceCombo.SelectionChanged += (_, _) =>
+        {
+            if (gdSourceCombo.SelectedItem is not ComboBoxItem chosen) return;
+            _gdSource = chosen.Tag as string ?? "netease";
+            ConfigureOnlineProviders();
+            SaveSettings();
+        };
+        panel.Children.Add(Field("GD · 音乐源", "GD音乐台聚合的底层曲库", gdSourceCombo));
+
+        var gdBitrateCombo = new ComboBox { Width = 160, VerticalContentAlignment = VerticalAlignment.Center };
+        foreach (var (label, value) in GdBitrates)
+            gdBitrateCombo.Items.Add(new ComboBoxItem { Content = label, Tag = value.ToString() });
+        foreach (var item in gdBitrateCombo.Items.OfType<ComboBoxItem>())
+            if (item.Tag as string == _gdBitrate.ToString()) gdBitrateCombo.SelectedItem = item;
+        if (gdBitrateCombo.SelectedItem is null && gdBitrateCombo.Items.Count > 0) gdBitrateCombo.SelectedIndex = 2;
+        gdBitrateCombo.SelectionChanged += (_, _) =>
+        {
+            if (gdBitrateCombo.SelectedItem is not ComboBoxItem chosen) return;
+            if (int.TryParse(chosen.Tag as string, out var bitrate)) { _gdBitrate = bitrate; ConfigureOnlineProviders(); SaveSettings(); }
+        };
+        panel.Children.Add(Field("GD · 音质", "320K 以上为无损 / Hi-Res", gdBitrateCombo));
+
+        var audiusBox = new TextBox { Text = _audiusAppName, Padding = new Thickness(10, 7, 10, 7), Width = 260, VerticalContentAlignment = VerticalAlignment.Center };
+        var audiusHost = new Border { Background = ResBrush("SunkenBrush"), CornerRadius = new CornerRadius(8), Child = audiusBox };
+        audiusBox.TextChanged += (_, _) => { _audiusAppName = audiusBox.Text.Trim(); ConfigureOnlineProviders(); SaveSettings(); };
+        panel.Children.Add(Field("Audius app_name", "向 Audius 标识应用，可留默认", audiusHost));
+
         var clientBox = new TextBox { Text = _jamendoClientId, Padding = new Thickness(10, 7, 10, 7), Width = 260, VerticalContentAlignment = VerticalAlignment.Center };
         var clientHost = new Border { Background = ResBrush("SunkenBrush"), CornerRadius = new CornerRadius(8), Child = clientBox };
-        clientBox.TextChanged += (_, _) => { _jamendoClientId = clientBox.Text.Trim(); _jamendo.ClientId = _jamendoClientId; SaveSettings(); };
-        panel.Children.Add(Field("Jamendo client_id", "在 developer.jamendo.com 免费申请", clientHost));
+        clientBox.TextChanged += (_, _) => { _jamendoClientId = clientBox.Text.Trim(); ConfigureOnlineProviders(); SaveSettings(); };
+        panel.Children.Add(Field("Jamendo client_id", "在 developer.jamendo.com 免费申请（可选）", clientHost));
+
         var downloadBox = new TextBox { Text = _downloadFolder, Padding = new Thickness(10, 7, 10, 7), Width = 220, VerticalContentAlignment = VerticalAlignment.Center };
         var downloadHost = new Border { Background = ResBrush("SunkenBrush"), CornerRadius = new CornerRadius(8), Child = downloadBox };
         var browse = new Button { Content = "选择…", Style = (Style)FindResource("GhostButton") };
         browse.Click += (_, _) =>
         {
             var picker = new Microsoft.Win32.OpenFolderDialog { Title = "选择下载目录" };
-            if (picker.ShowDialog(this) == true) downloadBox.Text = picker.FolderName;
+            if (picker.ShowDialog(this) == true && !string.IsNullOrWhiteSpace(picker.FolderName))
+            {
+                downloadBox.Text = picker.FolderName;
+                RegisterDownloadFolder(picker.FolderName, scan: true);
+            }
         };
         downloadBox.TextChanged += (_, _) => { _downloadFolder = downloadBox.Text.Trim(); SaveSettings(); };
+        downloadBox.LostFocus += (_, _) => RegisterDownloadFolder(_downloadFolder);
         var downloadRow = new StackPanel { Orientation = Orientation.Horizontal };
         downloadRow.Children.Add(downloadHost); downloadRow.Children.Add(browse);
-        panel.Children.Add(Field("下载目录", "在线下载保存位置", downloadRow));
+        panel.Children.Add(Field("下载目录", "在线下载保存位置（自动加入扫描文件夹）", downloadRow));
         SettingsBody.Children.Add(Card("在线", panel));
     }
 
@@ -2603,7 +3920,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         var glow = Math.Max(400, Math.Min(1100, Math.Min(width, height) * 1.6));
         NpBackground.Width = glow;
         NpBackground.Height = glow;
-        PlaybackBar.Width = Math.Max(320, Math.Min(680, width - 40));
+        PlaybackBar.Width = Math.Max(300, Math.Min(680, width - 24));
         UpdateDiscRotation();
     }
 
@@ -2660,7 +3977,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         else if (e.Key == Key.Right) Next_Click(sender, new RoutedEventArgs());
         else if (e.Key == Key.Escape)
         {
-            if (SettingsOverlay.Visibility == Visibility.Visible || LibraryOverlay.Visibility == Visibility.Visible) CloseOverlays_Click(sender, new RoutedEventArgs());
+            if (SettingsOverlay.Visibility == Visibility.Visible) CloseOverlays_Click(sender, new RoutedEventArgs());
             else if (_page is not null) { _page = null; ApplyPage(); }
         }
     }
@@ -2690,17 +4007,44 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         public string DisplayMode { get; set; } = "normal";
         public double DiscSize { get; set; } = 1.2;
         public double DiscSpeed { get; set; } = 26;
+        public double CdZoom { get; set; } = 1.0;
         public double WindowOpacity { get; set; } = 1.0;
+        public bool HideTitleBrand { get; set; }
         public bool ReduceMotion { get; set; }
         public string Theme { get; set; } = "system";
         public string ThemePreset { get; set; } = "deepspace";
         public string AccentSource { get; set; } = "cover";
         public string JamendoClientId { get; set; } = "";
         public string DownloadFolder { get; set; } = "";
+        public string OnlineProvider { get; set; } = OnlineMusicService.AllProviders;
+        public string GdSource { get; set; } = "netease";
+        public int GdBitrate { get; set; } = 320;
+        public string AudiusAppName { get; set; } = "XstarMusic";
         public bool EqEnabled { get; set; }
         public List<double>? EqGains { get; set; }
         public string VisualizerStyle { get; set; } = "stardust";
         public bool VisualizerShowInfo { get; set; } = true;
+        public bool VisualizerLyrics { get; set; }
+        public string ThreeDQuality { get; set; } = "balanced";
+        public string ThreeDShelfMode { get; set; } = "side";
+        public string ThreeDShelfPresence { get; set; } = "always";
+        public string ThreeDCameraMode { get; set; } = "dynamic";
+        public string ThreeDLibraryKind { get; set; } = "albums";
+        public int ThreeDCoverPreset { get; set; }
+        public bool ThreeDBloom { get; set; } = true;
+        public bool ThreeDLyrics { get; set; } = true;
+        public double ThreeDShelfSize { get; set; } = 1.0;
+        public double ThreeDShelfOffsetX { get; set; }
+        public double ThreeDShelfOffsetY { get; set; }
+        public double ThreeDShelfAngleY { get; set; }
+        public double ThreeDShelfOpacity { get; set; } = 1.0;
+        public string ThreeDBackgroundColor { get; set; } = "#05060A";
+        public string ThreeDBackgroundImage { get; set; } = "";
+        public double ThreeDParticleSize { get; set; } = 1.0;
+        public double ThreeDGlow { get; set; } = 1.0;
+        public double ThreeDParticleCount { get; set; } = 1.0;
+        public int ThreeDParticleColorMode { get; set; } = 1;
+        public string ThreeDParticleColor { get; set; } = "";
     }
 
     public sealed class SongRow
@@ -2716,6 +4060,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         public bool IsFavorite { get; set; }
         public string FavoriteGlyph => IsFavorite ? "\uEB52" : "\uEB51";
         public OnlineTrack? Online { get; set; }
+        public bool IsStatus { get; set; }
     }
 
     public sealed class LibraryItem

@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>XSTAR · 3D</title>
+  <link rel="stylesheet" href="style.css" />
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "./vendor/three.module.js",
+        "three/addons/": "./vendor/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <canvas id="stage"></canvas>
+
+  <!-- Immersive self-drawn window chrome -->
+  <header id="titlebar">
+    <div id="drag-region">
+      <span class="brand">XSTAR</span>
+      <span class="tag">3D 模式</span>
+    </div>
+    <div id="window-buttons">
+      <button id="btn-exit" title="退出 3D 模式">退出 3D</button>
+      <button class="win-btn" data-win="minimize" title="最小化">&#xE921;</button>
+      <button class="win-btn" data-win="maximize" title="最大化">&#xE922;</button>
+      <button class="win-btn danger" data-win="close" title="关闭">&#xE8BB;</button>
+    </div>
+  </header>
+
+  <!-- Now playing -->
+  <section id="now-playing">
+    <div id="np-title">还没有歌曲</div>
+    <div id="np-artist"></div>
+  </section>
+
+  <!-- 3D appearance settings (opened from the transport-bar icon) -->
+  <div id="settings-panel" hidden>
+    <details class="sec" open>
+      <summary>形态与粒子</summary>
+      <div class="sec-body">
+        <div class="row">
+          <label>形态</label>
+          <div class="seg" id="set-preset">
+            <button data-p="0">浮雕</button>
+            <button data-p="1">波纹</button>
+            <button data-p="2">球体</button>
+            <button data-p="3">漩涡</button>
+            <button data-p="4">律动</button>
+          </div>
+        </div>
+        <div class="row"><label>粒子大小</label><input id="set-psize" type="range" min="0.4" max="2.5" step="0.01" value="1" /></div>
+        <div class="row"><label>粒子光晕</label><input id="set-glow" type="range" min="0" max="2.5" step="0.01" value="1" /></div>
+        <div class="row"><label>粒子数量</label><input id="set-pcount" type="range" min="0.5" max="1.6" step="0.01" value="1" /></div>
+        <div class="row">
+          <label>粒子颜色</label>
+          <span class="pcolor-actions">
+            <div class="seg" id="set-pcolor">
+              <button data-c="0">单色</button>
+              <button data-c="1" class="active">自然</button>
+              <button data-c="2">彩色</button>
+            </div>
+            <input id="set-pcolorvalue" type="color" value="#22c55e" title="单色粒子颜色" />
+          </span>
+        </div>
+      </div>
+    </details>
+
+    <details class="sec">
+      <summary>歌单架</summary>
+      <div class="sec-body">
+        <div class="row">
+          <label>内容来源</label>
+          <div class="seg" id="source-seg">
+            <button data-source="albums" class="active">专辑</button>
+            <button data-source="playlists">歌单</button>
+            <button data-source="recent">最近</button>
+          </div>
+        </div>
+        <div class="row">
+          <label>歌单显示</label>
+          <div class="seg" id="set-presence">
+            <button data-v="always" class="active">常驻显示</button>
+            <button data-v="auto">自动隐藏</button>
+          </div>
+        </div>
+        <div class="row">
+          <label>歌单布局</label>
+          <div class="seg" id="set-shelf-mode">
+            <button data-v="side" class="active">侧栏</button>
+            <button data-v="stage">舞台</button>
+          </div>
+        </div>
+        <div class="row">
+          <label>镜头</label>
+          <div class="seg" id="set-camera">
+            <button data-v="dynamic" class="active">动态镜头</button>
+            <button data-v="static">静态镜头</button>
+          </div>
+        </div>
+        <div class="row"><label>歌单架大小</label><input id="set-size" type="range" min="0.6" max="1.4" step="0.01" value="1" /></div>
+        <div class="row"><label>左右位置</label><input id="set-offx" type="range" min="-1.2" max="1.2" step="0.01" value="0" /></div>
+        <div class="row"><label>上下位置</label><input id="set-offy" type="range" min="-1.2" max="1.2" step="0.01" value="0" /></div>
+        <div class="row"><label>侧向角度</label><input id="set-angle" type="range" min="-45" max="45" step="1" value="0" /></div>
+        <div class="row"><label>透明度</label><input id="set-opacity" type="range" min="0.3" max="1" step="0.01" value="1" /></div>
+      </div>
+    </details>
+
+    <details class="sec">
+      <summary>画面与背景</summary>
+      <div class="sec-body">
+        <div class="row">
+          <label>渲染质量</label>
+          <div class="seg" id="set-quality">
+            <button data-q="eco">节能</button>
+            <button data-q="balanced" class="active">均衡</button>
+            <button data-q="high">高画质</button>
+          </div>
+        </div>
+        <div class="row"><label>辉光</label><button id="set-bloom" class="toggle active">开</button></div>
+        <div class="row"><label>3D 歌词</label><button id="set-lyrics" class="toggle active">开</button></div>
+        <div class="row"><label>背景颜色</label><input id="set-bgcolor" type="color" value="#05060a" /></div>
+        <div class="row">
+          <label>背景图片</label>
+          <span class="bg-actions">
+            <button id="set-bgimg">选择…</button>
+            <button id="set-bgclear">清除</button>
+          </span>
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <!-- Transport -->
+  <footer id="transport">
+    <button class="transport-btn" data-action="prev" title="上一首">&#xE892;</button>
+    <button class="transport-btn primary" data-action="playpause" title="播放 / 暂停">&#xE768;</button>
+    <button class="transport-btn" data-action="next" title="下一首">&#xE893;</button>
+    <div class="progress">
+      <span id="time-current">00:00</span>
+      <input id="seek" type="range" min="0" max="1000" value="0" step="1" />
+      <span id="time-total">00:00</span>
+    </div>
+    <button id="btn-lyrics" class="transport-btn" title="3D 歌词" aria-label="3D 歌词">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
+           stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M4 5.5h16M4 10h16M4 14.5h11M4 19h7" />
+      </svg>
+    </button>
+    <button id="btn-appearance" class="transport-btn" title="外观设置">&#xE713;</button>
+  </footer>
+
+  <div id="hud">
+    <span id="fps">-- fps</span>
+    <span id="bridge">bridge: …</span>
+    <span id="quality">balanced</span>
+  </div>
+
+  <!-- Borderless-window resize handles -->
+  <div id="resize-edges">
+    <div class="rz n" data-edge="top"></div>
+    <div class="rz s" data-edge="bottom"></div>
+    <div class="rz w" data-edge="left"></div>
+    <div class="rz e" data-edge="right"></div>
+    <div class="rz nw" data-edge="topleft"></div>
+    <div class="rz ne" data-edge="topright"></div>
+    <div class="rz sw" data-edge="bottomleft"></div>
+    <div class="rz se" data-edge="bottomright"></div>
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

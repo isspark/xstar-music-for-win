@@ -45,6 +45,7 @@ public static class ThemeManager
         ("QualityHiresFgBrush", "#FCD34D", "#B45309"),
         ("QualityOnlineBgBrush", "#266E8BFF", "#1A6E8BFF"),
         ("QualityOnlineFgBrush", "#A9BBFF", "#4338CA"),
+        ("SongSelectionBrush", "#33FFFFFF", "#14000000"),
     };
 
     private static readonly ThemePreset Fallback = Presets[0];

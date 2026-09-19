@@ -2,8 +2,9 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+        xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
         xmlns:local="clr-namespace:Xstar.Music.App"
-        Title="XSTAR" Width="900" Height="620" MinWidth="680" MinHeight="500"
+        Title="XSTAR" Width="900" Height="620" MinWidth="340" MinHeight="500"
         Icon="pack://application:,,,/Assets/app.ico"
         WindowStartupLocation="CenterScreen"
         WindowStyle="None" AllowsTransparency="True" ResizeMode="CanResize"
@@ -64,6 +65,15 @@
             <Setter Property="IsHitTestVisible" Value="False"/>
         </Style>
 
+        <!-- "词" chip: opens the lyrics view from the now-playing area (all display modes) -->
+        <Style x:Key="LyricsChipButton" TargetType="Button" BasedOn="{StaticResource GhostButton}">
+            <Setter Property="Padding" Value="10,4"/>
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="Margin" Value="0,0,8,0"/>
+            <Setter Property="MinWidth" Value="0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+        </Style>
+
         <!-- icon-only ui:Button (sized to match the window caption buttons) -->
         <Style x:Key="IconBtn" TargetType="{x:Type ui:Button}" BasedOn="{StaticResource {x:Type ui:Button}}">
             <Setter Property="Width" Value="44"/>
@@ -100,6 +110,7 @@
         <!-- CD mode: shared right-click menu (a new instance per attach) -->
         <ContextMenu x:Key="CdMenu" x:Shared="False" Opened="CdMenu_Opened">
             <MenuItem Header="显示歌词" Click="CdLyricsToggle_Click"/>
+            <MenuItem Header="重置唱片缩放" Click="CdResetZoom_Click"/>
             <MenuItem Header="设置" Click="CdSettings_Click"/>
             <MenuItem Header="退出 CD 唱片模式" Click="ExitCdMode_Click"/>
         </ContextMenu>
@@ -137,6 +148,53 @@
                 </Border>
                 <TextBlock Grid.Column="4" Text="{Binding Format}" Foreground="{DynamicResource TextFillColorSecondaryBrush}" FontSize="10.5" VerticalAlignment="Center" HorizontalAlignment="Center"/>
                 <TextBlock Grid.Column="5" Text="{Binding DurationText}" Foreground="{DynamicResource TextFillColorTertiaryBrush}" FontSize="11" VerticalAlignment="Center" HorizontalAlignment="Right" Margin="0,0,14,0"/>
+            </Grid>
+        </DataTemplate>
+
+        <!-- ===== Online result row: playlist style + inline 试听 / 下载 actions ===== -->
+        <DataTemplate x:Key="OnlineSongTemplate">
+            <Grid Height="46">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="{StaticResource ColIndex}"/>
+                    <ColumnDefinition Width="{StaticResource ColFav}"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="{StaticResource ColQuality}"/>
+                    <ColumnDefinition Width="{StaticResource ColFormat}"/>
+                    <ColumnDefinition Width="{StaticResource ColDuration}"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" Text="{Binding DisplayIndex}" Foreground="{DynamicResource TextFillColorTertiaryBrush}" FontSize="11.5" VerticalAlignment="Center" HorizontalAlignment="Right" Margin="0,0,10,0"/>
+                <TextBlock Grid.Column="1" Text="{Binding FavoriteGlyph}" FontFamily="{StaticResource IconFont}" FontSize="13" VerticalAlignment="Center" HorizontalAlignment="Center" Foreground="{DynamicResource TextFillColorTertiaryBrush}"/>
+                <TextBlock Grid.Column="2" VerticalAlignment="Center" Margin="6,0,12,0" FontSize="13" TextTrimming="CharacterEllipsis">
+                    <Run Text="{Binding Title, Mode=OneWay}" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorPrimaryBrush}"/>
+                    <Run Text="&#160;&#160;" Foreground="{DynamicResource TextFillColorTertiaryBrush}"/>
+                    <Run Text="{Binding Artist, Mode=OneWay}" FontSize="11.5" Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+                </TextBlock>
+                <Border Grid.Column="3" Style="{StaticResource QualityBadge}">
+                    <TextBlock Text="{Binding Song.Quality}" FontSize="10" Foreground="{Binding (TextElement.Foreground), RelativeSource={RelativeSource AncestorType=Border}}"/>
+                </Border>
+                <TextBlock Grid.Column="4" Text="{Binding Format}" Foreground="{DynamicResource TextFillColorSecondaryBrush}" FontSize="10.5" VerticalAlignment="Center" HorizontalAlignment="Center"/>
+                <TextBlock Grid.Column="5" Text="{Binding DurationText}" Foreground="{DynamicResource TextFillColorTertiaryBrush}" FontSize="11" VerticalAlignment="Center" HorizontalAlignment="Right" Margin="0,0,14,0"/>
+                <StackPanel Grid.Column="6" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,10,0">
+                    <StackPanel.Style>
+                        <Style TargetType="StackPanel">
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding Online}" Value="{x:Null}">
+                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </StackPanel.Style>
+                    <Button Content="试听" Tag="{Binding}" Click="OnlineAudition_Click" Style="{StaticResource RowActionButton}"/>
+                    <Button Content="下载" Tag="{Binding}" Click="OnlineDownload_Click">
+                        <Button.Style>
+                            <Style TargetType="Button" BasedOn="{StaticResource RowActionButton}">
+                                <Setter Property="IsEnabled" Value="{Binding Online.Downloadable}"/>
+                            </Style>
+                        </Button.Style>
+                    </Button>
+                </StackPanel>
+                <Border Grid.Column="0" Grid.ColumnSpan="7" Style="{StaticResource RowDivider}"/>
             </Grid>
         </DataTemplate>
 
@@ -245,17 +303,15 @@
                      ShowMinimize="True" ShowMaximize="True" ShowClose="True">
             <ui:TitleBar.TrailingContent>
                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,6,0">
-                    <ui:Button x:Name="PlaylistButton" Style="{StaticResource IconBtn}" Click="PageToggle_Click" ToolTip="播放列表">
-                        <TextBlock Text="&#xE8FD;" FontFamily="{StaticResource IconFont}" FontSize="14"/>
-                    </ui:Button>
-                    <ui:Button x:Name="LyricsButton" Style="{StaticResource IconBtn}" Click="Lyrics_Click" ToolTip="歌词">
-                        <TextBlock Text="&#xE8D2;" FontFamily="{StaticResource IconFont}" FontSize="14"/>
-                    </ui:Button>
-                    <ui:Button x:Name="LibraryButton" Style="{StaticResource IconBtn}" Click="Library_Click" ToolTip="音乐库">
+                    <ui:Button x:Name="LibraryButton" Style="{StaticResource IconBtn}" Click="Library_Click" ToolTip="库">
                         <TextBlock Text="&#xE8A9;" FontFamily="{StaticResource IconFont}" FontSize="14"/>
-                    </ui:Button>
-                    <ui:Button x:Name="EqButton" Style="{StaticResource IconBtn}" Click="Eq_Click" ToolTip="均衡器">
-                        <TextBlock Text="&#xE799;" FontFamily="{StaticResource IconFont}" FontSize="14"/>
+                        <ui:Button.ContextMenu>
+                            <ContextMenu>
+                                <MenuItem Header="播放列表" Click="Playlist_Click"/>
+                                <MenuItem Header="我的音乐库" Click="MyLibrary_Click"/>
+                                <MenuItem Header="在线音乐库" Click="OnlineLibrary_Click"/>
+                            </ContextMenu>
+                        </ui:Button.ContextMenu>
                     </ui:Button>
                     <ui:Button x:Name="SettingsButton" Style="{StaticResource IconBtn}" Click="Settings_Click" ToolTip="设置">
                         <TextBlock Text="&#xE713;" FontFamily="{StaticResource IconFont}" FontSize="14"/>
@@ -271,7 +327,10 @@
         <Grid x:Name="Stage" Grid.Row="1" ClipToBounds="True" SizeChanged="Stage_SizeChanged"
               PreviewMouseLeftButtonDown="Stage_PreviewMouseLeftButtonDown"
               PreviewMouseMove="Stage_PreviewMouseMove"
-              PreviewMouseLeftButtonUp="Stage_PreviewMouseLeftButtonUp">
+              PreviewMouseLeftButtonUp="Stage_PreviewMouseLeftButtonUp"
+              PreviewMouseWheel="Stage_PreviewMouseWheel"
+              ManipulationStarting="Stage_ManipulationStarting"
+              ManipulationDelta="Stage_ManipulationDelta">
 
             <!-- Album / now playing view (default) -->
             <Grid x:Name="AlbumView">
@@ -360,6 +419,7 @@
                         </TextBlock.Effect>
                     </TextBlock>
                     <StackPanel x:Name="InfoChips" Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,18,0,0">
+                        <Button x:Name="LyricsChipButton" Content="词" Style="{StaticResource LyricsChipButton}" Click="Lyrics_Click" ToolTip="歌词"/>
                         <Border x:Name="QualityChip" Background="{DynamicResource ControlFillColorDefaultBrush}" CornerRadius="4" Padding="10,4" Margin="0,0,8,0" VerticalAlignment="Center">
                             <TextBlock x:Name="QualityText" Text="普通" Foreground="{DynamicResource TextFillColorSecondaryBrush}" FontSize="11"/>
                         </Border>
@@ -421,7 +481,41 @@
                                TextAlignment="Center" Foreground="#CCFFFFFF" Margin="0,4,0,0">
                         <TextBlock.Effect><DropShadowEffect BlurRadius="10" ShadowDepth="0" Opacity="0.6" Color="#000000"/></TextBlock.Effect>
                     </TextBlock>
+                    <!-- Quality / spec + lyrics entry, mirroring the normal now-playing chips -->
+                    <StackPanel x:Name="VisualizerInfoChips" Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,12,0,0">
+                        <Button Content="词" Style="{StaticResource LyricsChipButton}" Background="#33FFFFFF" BorderBrush="#59FFFFFF" Foreground="White" Click="Lyrics_Click" ToolTip="歌词"/>
+                        <Border Background="#33FFFFFF" CornerRadius="4" Padding="10,4" Margin="0,0,8,0" VerticalAlignment="Center">
+                            <TextBlock x:Name="VizQualityText" Text="普通" Foreground="#E6FFFFFF" FontSize="11"/>
+                        </Border>
+                        <Border x:Name="VizSpecChip" Background="#33FFFFFF" CornerRadius="4" Padding="10,4" VerticalAlignment="Center">
+                            <TextBlock x:Name="VizSpecText" Text="" Foreground="#E6FFFFFF" FontSize="11"/>
+                        </Border>
+                    </StackPanel>
                 </StackPanel>
+
+                <!-- Optional lyrics overlay (toggled by the title-bar lyrics button) -->
+                <Grid x:Name="VisualizerLyricsOverlay" Visibility="Collapsed" Background="#66000000">
+                    <Grid.ContextMenu>
+                        <ContextMenu>
+                            <MenuItem Header="返回播放页面" Click="BackToPlayback_Click"/>
+                        </ContextMenu>
+                    </Grid.ContextMenu>
+                    <DockPanel Margin="24,20,24,116">
+                        <StackPanel DockPanel.Dock="Top" Margin="0,0,0,12">
+                            <TextBlock x:Name="VizLyricsTitle" Text="还没有歌曲" FontSize="20" FontWeight="Bold"
+                                       TextAlignment="Center" TextTrimming="CharacterEllipsis"
+                                       Foreground="#F2FFFFFF">
+                                <TextBlock.Effect><DropShadowEffect BlurRadius="12" ShadowDepth="0" Opacity="0.6" Color="#000000"/></TextBlock.Effect>
+                            </TextBlock>
+                            <TextBlock x:Name="VizLyricsSub" Text="" FontSize="12" TextAlignment="Center"
+                                       TextTrimming="CharacterEllipsis" Margin="0,4,0,0"
+                                       Foreground="#B3FFFFFF"/>
+                        </StackPanel>
+                        <ScrollViewer x:Name="VizLyricsView" VerticalScrollBarVisibility="Hidden" Background="Transparent" Padding="0,4,0,20">
+                            <StackPanel x:Name="VizLyricsPanel" HorizontalAlignment="Center"/>
+                        </ScrollViewer>
+                    </DockPanel>
+                </Grid>
             </Grid>
 
             <!-- Playlist page -->
@@ -441,13 +535,15 @@
                         <TextBlock Text="播放列表" FontSize="14" FontWeight="SemiBold"
                                    Foreground="{DynamicResource TextFillColorPrimaryBrush}" VerticalAlignment="Center"/>
                     </StackPanel>
-                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+                        <ui:TextBox x:Name="PlaylistSearchBox" Width="200" PlaceholderText="搜索" Margin="0,0,8,0" TextChanged="PlaylistSearch_TextChanged"/>
                         <ui:Button x:Name="SortButton" Style="{StaticResource IconBtn}" Click="Sort_Click" ToolTip="排序">
                             <TextBlock Text="&#xE8CB;" FontFamily="{StaticResource IconFont}" FontSize="15"/>
                         </ui:Button>
                         <ui:Button x:Name="ClearButton" Style="{StaticResource IconBtn}" Click="Clear_Click" ToolTip="清空队列">
                             <TextBlock Text="&#xE74D;" FontFamily="{StaticResource IconFont}" FontSize="15"/>
                         </ui:Button>
+                        <ui:Button x:Name="PlaylistCloseButton" Content="关闭" Appearance="Secondary" Margin="8,0,0,0" Click="PlaylistClose_Click"/>
                     </StackPanel>
                 </Grid>
 
@@ -470,24 +566,103 @@
                 </Grid>
                 <Border Grid.Row="2" Height="1" Margin="0,6,0,0" Background="{DynamicResource CardStrokeColorDefaultBrush}"/>
 
-                <ListBox x:Name="SongList" Grid.Row="3" ItemTemplate="{StaticResource PlaylistSongTemplate}" Margin="0,2,0,150"
+                <ListBox x:Name="SongList" Grid.Row="3" ItemTemplate="{StaticResource PlaylistSongTemplate}" ItemContainerStyle="{StaticResource SongListItem}" Margin="0,2,0,150"
                          Background="Transparent" BorderThickness="0"
                          MouseDoubleClick="SongList_DoubleClick" PreviewMouseRightButtonDown="SongList_MouseRightButtonDown"/>
             </Grid>
 
-            <!-- Lyrics page -->
-            <Grid x:Name="LyricsPage" Visibility="Collapsed" Margin="16,10,16,0">
+            <!-- Lyrics page — layout mirrors the visualizer lyrics overlay -->
+            <Grid x:Name="LyricsPage" Visibility="Collapsed" Margin="16,10,16,0" Background="Transparent">
+                <Grid.ContextMenu>
+                    <ContextMenu Opened="LyricsMenu_Opened">
+                        <MenuItem Header="返回播放页面" Click="BackToPlayback_Click"/>
+                        <Separator/>
+                        <MenuItem Header="重新获取歌词（LRCLIB）" Click="FetchLyrics_Click"/>
+                    </ContextMenu>
+                </Grid.ContextMenu>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
-                <Grid Grid.Row="0" Margin="0,0,0,6">
-                    <TextBlock x:Name="LyricsHead" Text="歌词" FontSize="14" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorPrimaryBrush}" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="8,0,0,0"/>
-                    <ui:Button x:Name="FetchLyricsButton" Content="获取歌词（LRCLIB）" Appearance="Secondary" HorizontalAlignment="Right" Click="FetchLyrics_Click"/>
-                </Grid>
-                <ScrollViewer x:Name="LyricsView" Grid.Row="1" VerticalScrollBarVisibility="Auto" Padding="0,6,0,150">
-                    <StackPanel x:Name="LyricsPanel" HorizontalAlignment="Center" Margin="0,0,0,20"/>
+                <StackPanel Grid.Row="0" Margin="0,0,0,12">
+                    <TextBlock x:Name="LyricsHead" Text="还没有歌曲" FontSize="20" FontWeight="Bold"
+                               TextAlignment="Center" TextTrimming="CharacterEllipsis"
+                               Foreground="{DynamicResource TextFillColorPrimaryBrush}"/>
+                    <TextBlock x:Name="LyricsSub" Text="" FontSize="12" TextAlignment="Center"
+                               TextTrimming="CharacterEllipsis" Margin="0,4,0,0"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+                </StackPanel>
+                <ScrollViewer x:Name="LyricsView" Grid.Row="1" VerticalScrollBarVisibility="Hidden" Padding="0,4,0,150">
+                    <StackPanel x:Name="LyricsPanel" HorizontalAlignment="Center"/>
                 </ScrollViewer>
+            </Grid>
+
+            <!-- Library page (我的音乐库 / 在线音乐库) — same chrome as the playlist page -->
+            <Grid x:Name="LibraryPage" Visibility="Collapsed" Margin="16,10,16,0">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <!-- Header -->
+                <Grid Grid.Row="0" Margin="0,0,0,10">
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="8,0,0,0">
+                        <Border Width="3" Height="15" CornerRadius="2" Margin="0,0,8,0" Background="{DynamicResource AccentFillColorDefaultBrush}"/>
+                        <TextBlock x:Name="LibraryTitle" Text="音乐库" FontSize="14" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorPrimaryBrush}" VerticalAlignment="Center"/>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+                        <ui:ProgressRing x:Name="OnlineSearchRing" Width="18" Height="18" Margin="0,0,8,0" VerticalAlignment="Center" Visibility="Collapsed" IsIndeterminate="True"/>
+                        <TextBlock x:Name="OnlineSearchStatus" Text="搜索中…" Margin="0,0,10,0" VerticalAlignment="Center" Foreground="{DynamicResource TextFillColorSecondaryBrush}" FontSize="12" Visibility="Collapsed"/>
+                        <ui:TextBox x:Name="SearchBox" Width="240" PlaceholderText="搜索" Margin="0,0,8,0" TextChanged="Search_TextChanged" KeyDown="SearchBox_KeyDown"/>
+                        <ComboBox x:Name="OnlineSourceBox" Width="118" Margin="0,0,8,0" VerticalAlignment="Center" Visibility="Collapsed" SelectionChanged="OnlineSource_Changed"/>
+                        <ui:Button x:Name="OnlineSearchButton" Content="搜索" Padding="12,6" Margin="0,0,8,0" Visibility="Collapsed" Click="OnlineSearchButton_Click"/>
+                        <ui:Button x:Name="LibraryCloseButton" Content="关闭" Appearance="Secondary" Click="LibraryClose_Click"/>
+                    </StackPanel>
+                </Grid>
+
+                <!-- Category tabs -->
+                <StackPanel x:Name="LibraryTabs" Grid.Row="1" Orientation="Horizontal" Margin="8,0,0,8">
+                    <ToggleButton x:Name="LibTabSongs" Content="歌曲" IsChecked="True" Click="LibraryTab_Click" Tag="songs" Margin="0,0,4,0"/>
+                    <ToggleButton x:Name="LibTabAlbums" Content="专辑" Click="LibraryTab_Click" Tag="albums" Margin="0,0,4,0"/>
+                    <ToggleButton x:Name="LibTabArtists" Content="艺术家" Click="LibraryTab_Click" Tag="artists" Margin="0,0,4,0"/>
+                    <ToggleButton x:Name="LibTabFavorites" Content="收藏" Click="LibraryTab_Click" Tag="favorites" Margin="0,0,4,0"/>
+                    <ToggleButton x:Name="LibTabRecent" Content="最近" Click="LibraryTab_Click" Tag="recent" Margin="0,0,4,0"/>
+                    <ToggleButton x:Name="LibTabPlaylists" Content="歌单" Click="LibraryTab_Click" Tag="playlists"/>
+                </StackPanel>
+
+                <!-- Column header -->
+                <Grid x:Name="LibraryColumns" Grid.Row="2">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="{StaticResource ColIndex}"/>
+                        <ColumnDefinition Width="{StaticResource ColFav}"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="{StaticResource ColQuality}"/>
+                        <ColumnDefinition Width="{StaticResource ColFormat}"/>
+                        <ColumnDefinition Width="{StaticResource ColDuration}"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="#" Foreground="{DynamicResource TextFillColorTertiaryBrush}" FontSize="10.5" VerticalAlignment="Center" HorizontalAlignment="Right" Margin="0,0,10,0"/>
+                    <TextBlock Grid.Column="1" Text="&#xEB51;" FontFamily="{StaticResource IconFont}" Foreground="{DynamicResource TextFillColorTertiaryBrush}" FontSize="11" VerticalAlignment="Center" HorizontalAlignment="Center"/>
+                    <TextBlock Grid.Column="2" Text="歌曲" Foreground="{DynamicResource TextFillColorTertiaryBrush}" FontSize="10.5" VerticalAlignment="Center" Margin="6,0,12,0"/>
+                    <TextBlock Grid.Column="3" Text="音质" Foreground="{DynamicResource TextFillColorTertiaryBrush}" FontSize="10.5" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                    <TextBlock Grid.Column="4" Text="格式" Foreground="{DynamicResource TextFillColorTertiaryBrush}" FontSize="10.5" VerticalAlignment="Center" HorizontalAlignment="Center"/>
+                    <TextBlock Grid.Column="5" Text="时长" Foreground="{DynamicResource TextFillColorTertiaryBrush}" FontSize="10.5" VerticalAlignment="Center" HorizontalAlignment="Right" Margin="0,0,14,0"/>
+                </Grid>
+                <Border x:Name="LibraryDivider" Grid.Row="3" Height="1" Margin="0,6,0,0" Background="{DynamicResource CardStrokeColorDefaultBrush}"/>
+
+                <!-- Content -->
+                <Grid Grid.Row="4" Margin="0,2,0,150">
+                    <ListBox x:Name="LibraryList" ItemTemplate="{StaticResource PlaylistSongTemplate}" ItemContainerStyle="{StaticResource SongListItem}" Background="Transparent" BorderThickness="0" MouseDoubleClick="SongList_DoubleClick" PreviewMouseRightButtonDown="SongList_MouseRightButtonDown"/>
+                    <ScrollViewer x:Name="LibraryGridScroll" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                        <ItemsControl x:Name="LibraryGrid" ItemTemplate="{StaticResource AlbumCardTemplate}" MouseDoubleClick="LibraryGrid_DoubleClick">
+                            <ItemsControl.ItemsPanel>
+                                <ItemsPanelTemplate><WrapPanel Orientation="Horizontal"/></ItemsPanelTemplate>
+                            </ItemsControl.ItemsPanel>
+                        </ItemsControl>
+                    </ScrollViewer>
+                </Grid>
             </Grid>
 
             <!-- Floating transparent playback bar -->
@@ -517,31 +692,24 @@
                         <Popup x:Name="VolumePopup" PlacementTarget="{Binding ElementName=VolumeButton}" Placement="Top" StaysOpen="False" AllowsTransparency="True">
                             <Border Background="{DynamicResource SolidBackgroundFillColorSecondaryBrush}" BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="14,10" Margin="0,0,0,8">
                                 <StackPanel Orientation="Horizontal">
-                                    <Slider x:Name="VolumeSlider" Width="130" Minimum="0" Maximum="1" Value="0.72" ValueChanged="Volume_ValueChanged"/>
+                                    <Slider x:Name="VolumeSlider" Width="130" Minimum="0" Maximum="1" Value="0.72" IsMoveToPointEnabled="True" ValueChanged="Volume_ValueChanged"/>
                                     <TextBlock x:Name="VolumeText" Text="72%" Foreground="{DynamicResource TextFillColorPrimaryBrush}" FontSize="11.5" Margin="10,0,0,0" VerticalAlignment="Center" Width="34"/>
                                 </StackPanel>
                             </Border>
                         </Popup>
                     </Grid>
+                    <Grid x:Name="VizStyleHost" Width="44" Height="44" Visibility="Collapsed">
+                        <ui:Button x:Name="VizStyleButton" Style="{StaticResource TransportUi}" Click="VizStyle_Click" ToolTip="可视化风格">
+                            <TextBlock Text="&#xE790;" FontFamily="{StaticResource IconFont}" FontSize="18"/>
+                        </ui:Button>
+                        <Popup x:Name="VizStylePopup" PlacementTarget="{Binding ElementName=VizStyleButton}" Placement="Top" StaysOpen="False" AllowsTransparency="True">
+                            <Border Background="{DynamicResource SolidBackgroundFillColorSecondaryBrush}" BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="10" Padding="8,8" Margin="0,0,0,8" MinWidth="150">
+                                <StackPanel x:Name="VizStylePanel"/>
+                            </Border>
+                        </Popup>
+                    </Grid>
                 </StackPanel>
 
-                <!-- EQ Popup (declared here so it shares the main visual tree) -->
-                <Popup x:Name="EqPopup" PlacementTarget="{Binding ElementName=EqButton}" Placement="Bottom" StaysOpen="False" AllowsTransparency="True">
-                    <Border Background="{DynamicResource SolidBackgroundFillColorSecondaryBrush}" BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="10" Padding="14,12" Margin="0,4,0,0" Width="340">
-                        <StackPanel>
-                            <Grid Margin="0,0,0,10">
-                                <TextBlock Text="均衡器" FontSize="13.5" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorPrimaryBrush}" VerticalAlignment="Center"/>
-                                <ToggleButton x:Name="EqEnableToggle" Content="开启" HorizontalAlignment="Right" VerticalAlignment="Center" Click="EqEnable_Click"/>
-                            </Grid>
-                            <ItemsControl x:Name="EqBandsPanel">
-                                <ItemsControl.ItemsPanel>
-                                    <ItemsPanelTemplate><StackPanel Orientation="Horizontal"/></ItemsPanelTemplate>
-                                </ItemsControl.ItemsPanel>
-                            </ItemsControl>
-                            <WrapPanel x:Name="EqPresetsPanel" Margin="0,10,0,0" Orientation="Horizontal"/>
-                        </StackPanel>
-                    </Border>
-                </Popup>
                 <Grid Margin="0,10,0,0">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="48"/>
@@ -549,45 +717,10 @@
                         <ColumnDefinition Width="48"/>
                     </Grid.ColumnDefinitions>
                     <TextBlock x:Name="CurrentTime" Grid.Column="0" Text="00:00" Foreground="{DynamicResource TextFillColorSecondaryBrush}" FontSize="11" VerticalAlignment="Center"/>
-                    <Slider x:Name="ProgressSlider" Grid.Column="1" Minimum="0" Maximum="1" ValueChanged="Progress_ValueChanged"/>
+                    <Slider x:Name="ProgressSlider" Grid.Column="1" Minimum="0" Maximum="1" IsMoveToPointEnabled="True" ValueChanged="Progress_ValueChanged"/>
                     <TextBlock x:Name="TotalTime" Grid.Column="2" Text="00:00" Foreground="{DynamicResource TextFillColorSecondaryBrush}" FontSize="11" HorizontalAlignment="Right" VerticalAlignment="Center"/>
                 </Grid>
             </StackPanel>
-        </Grid>
-
-        <!-- ===================== Library overlay ===================== -->
-        <Grid x:Name="LibraryOverlay" Grid.Row="1" Background="{DynamicResource PageOverlayBrush}" Visibility="Collapsed">
-            <Grid.RowDefinitions>
-                <RowDefinition Height="56"/>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="*"/>
-            </Grid.RowDefinitions>
-            <Grid Grid.Row="0" Margin="20,0">
-                <TextBlock Text="音乐库" FontSize="17" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorPrimaryBrush}" VerticalAlignment="Center"/>
-                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
-                    <ui:TextBox x:Name="SearchBox" Width="240" PlaceholderText="搜索" Margin="0,0,8,0" TextChanged="Search_TextChanged"/>
-                    <ToggleButton x:Name="OnlineButton" Content="在线" Padding="12,6" Margin="0,0,8,0" Click="Online_Click"/>
-                    <ui:Button x:Name="LibraryCloseButton" Content="关闭" Appearance="Secondary" Click="CloseOverlays_Click"/>
-                </StackPanel>
-            </Grid>
-            <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="14,0">
-                <ToggleButton x:Name="LibTabSongs" Content="歌曲" IsChecked="True" Click="LibraryTab_Click" Tag="songs" Margin="0,0,4,0"/>
-                <ToggleButton x:Name="LibTabAlbums" Content="专辑" Click="LibraryTab_Click" Tag="albums" Margin="0,0,4,0"/>
-                <ToggleButton x:Name="LibTabArtists" Content="艺术家" Click="LibraryTab_Click" Tag="artists" Margin="0,0,4,0"/>
-                <ToggleButton x:Name="LibTabFavorites" Content="收藏" Click="LibraryTab_Click" Tag="favorites" Margin="0,0,4,0"/>
-                <ToggleButton x:Name="LibTabRecent" Content="最近" Click="LibraryTab_Click" Tag="recent" Margin="0,0,4,0"/>
-                <ToggleButton x:Name="LibTabPlaylists" Content="歌单" Click="LibraryTab_Click" Tag="playlists"/>
-            </StackPanel>
-            <Grid Grid.Row="2" Margin="16,8,16,20">
-                <ListBox x:Name="LibraryList" ItemTemplate="{StaticResource SongTemplate}" Background="Transparent" BorderThickness="0" MouseDoubleClick="SongList_DoubleClick"/>
-                <ScrollViewer x:Name="LibraryGridScroll" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-                    <ItemsControl x:Name="LibraryGrid" ItemTemplate="{StaticResource AlbumCardTemplate}" MouseDoubleClick="LibraryGrid_DoubleClick">
-                        <ItemsControl.ItemsPanel>
-                            <ItemsPanelTemplate><WrapPanel Orientation="Horizontal"/></ItemsPanelTemplate>
-                        </ItemsControl.ItemsPanel>
-                    </ItemsControl>
-                </ScrollViewer>
-            </Grid>
         </Grid>
 
         <!-- ===================== Settings overlay ===================== -->
@@ -620,6 +753,13 @@
                     <StackPanel x:Name="SettingsBody"/>
                 </ScrollViewer>
             </Grid>
+        </Grid>
+
+        <!-- ===================== 3D 模式 (immersive, WebView2) =====================
+             Sits above everything (spans title bar + stage) because the WebView2 is a child
+             HWND that cannot compose with WPF elements; all 3D-mode UI is drawn in the page. -->
+        <Grid x:Name="ThreeDView" Grid.RowSpan="2" Visibility="Collapsed" Background="#08080E">
+            <wv2:WebView2 x:Name="ThreeDWebView" />
         </Grid>
     </Grid>
     </Border>

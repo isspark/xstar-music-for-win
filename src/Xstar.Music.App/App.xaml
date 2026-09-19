@@ -30,6 +30,9 @@
             <SolidColorBrush x:Key="QualityOnlineBgBrush" Color="#266E8BFF"/>
             <SolidColorBrush x:Key="QualityOnlineFgBrush" Color="#A9BBFF"/>
 
+            <!-- List row selection tint: subtle, theme-aware, keeps row text readable -->
+            <SolidColorBrush x:Key="SongSelectionBrush" Color="#33FFFFFF"/>
+
             <Style x:Key="SectionCard" TargetType="Border">
                 <Setter Property="Background" Value="{DynamicResource CardBackgroundFillColorDefaultBrush}"/>
                 <Setter Property="BorderBrush" Value="{DynamicResource CardStrokeColorDefaultBrush}"/>
@@ -76,6 +79,37 @@
             </Style>
 
             <Style x:Key="SwitchToggle" TargetType="ToggleButton" BasedOn="{StaticResource {x:Type ToggleButton}}"/>
+
+            <!-- Song list rows: subtle hover/selection so text stays readable in both themes -->
+            <Style x:Key="SongListItem" TargetType="ListBoxItem">
+                <Setter Property="Padding" Value="0"/>
+                <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                <Setter Property="Background" Value="Transparent"/>
+                <Setter Property="Template">
+                    <Setter.Value>
+                        <ControlTemplate TargetType="ListBoxItem">
+                            <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="8" Margin="0,1" Padding="0">
+                                <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center"/>
+                            </Border>
+                            <ControlTemplate.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter TargetName="Bd" Property="Background" Value="{DynamicResource SubtleFillColorSecondaryBrush}"/>
+                                </Trigger>
+                                <Trigger Property="IsSelected" Value="True">
+                                    <Setter TargetName="Bd" Property="Background" Value="{DynamicResource SongSelectionBrush}"/>
+                                </Trigger>
+                            </ControlTemplate.Triggers>
+                        </ControlTemplate>
+                    </Setter.Value>
+                </Setter>
+            </Style>
+
+            <Style x:Key="RowActionButton" TargetType="Button" BasedOn="{StaticResource GhostButton}">
+                <Setter Property="Padding" Value="10,3"/>
+                <Setter Property="FontSize" Value="11"/>
+                <Setter Property="MinWidth" Value="42"/>
+                <Setter Property="Margin" Value="0,0,6,0"/>
+            </Style>
         </ResourceDictionary>
     </Application.Resources>
 </Application>

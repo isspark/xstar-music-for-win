@@ -3,42 +3,37 @@ using System.Text.Json;
 
 namespace Xstar.Music.Core;
 
-public sealed record OnlineTrack(
-    string Id,
-    string Title,
-    string Artist,
-    string Album,
-    long DurationMs,
-    string? StreamUrl,
-    string? DownloadUrl,
-    string? ImageUrl)
-{
-    public bool Downloadable => !string.IsNullOrWhiteSpace(DownloadUrl);
-}
-
-public sealed class JamendoProvider
+/// <summary>Jamendo (api.jamendo.com) provider of free Creative Commons music.</summary>
+public sealed class JamendoProvider : IOnlineMusicProvider
 {
     private const string BaseEndpoint = "https://api.jamendo.com/v3.0";
     private readonly HttpClient _http;
 
     public JamendoProvider(HttpMessageHandler? handler = null)
     {
-        _http = handler is null ? new HttpClient() : new HttpClient(handler);
-        _http.Timeout = TimeSpan.FromSeconds(15);
+        _http = handler is null
+            ? OnlineHttp.Create(TimeSpan.FromSeconds(15))
+            : new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(15) };
         _http.DefaultRequestHeaders.UserAgent.ParseAdd("XstarMusic/1.0");
     }
 
+    public string Key => "jamendo";
+
+    public string DisplayName => "Jamendo";
+
     public string ClientId { get; set; } = "";
+
+    public bool IsConfigured => !string.IsNullOrWhiteSpace(ClientId);
 
     public async Task<IReadOnlyList<OnlineTrack>> SearchAsync(string query, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(ClientId) || string.IsNullOrWhiteSpace(query)) return Array.Empty<OnlineTrack>();
         var url = $"{BaseEndpoint}/tracks/?client_id={Uri.EscapeDataString(ClientId)}&format=json&limit=30&search={Uri.EscapeDataString(query)}&audioformat=mp32";
-        using var response = await _http.GetAsync(url, cancellationToken);
+        using var response = await _http.GetAsync(url, cancellationToken).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode) return Array.Empty<OnlineTrack>();
 
-        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-        using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+        using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken).ConfigureAwait(false);
         if (!document.RootElement.TryGetProperty("results", out var results) || results.ValueKind != JsonValueKind.Array)
             return Array.Empty<OnlineTrack>();
 
@@ -58,31 +53,35 @@ public sealed class JamendoProvider
                 duration * 1000,
                 GetString(item, "audio"),
                 allowed ? GetString(item, "audiodownload") : null,
-                GetString(item, "image")));
+                GetString(item, "image"))
+            {
+                ProviderKey = Key
+            });
         }
         return tracks;
     }
 
+    public Task<string?> ResolveStreamUrlAsync(OnlineTrack track, CancellationToken cancellationToken = default) =>
+        Task.FromResult(track.StreamUrl);
+
     public async Task<string> DownloadAsync(OnlineTrack track, string directory, CancellationToken cancellationToken = default)
     {
         var url = track.DownloadUrl ?? track.StreamUrl ?? throw new InvalidOperationException("该曲目不提供下载");
-        using var response = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        using var response = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
-        Directory.CreateDirectory(directory);
-        var path = Path.Combine(directory, Sanitize($"{track.Artist} - {track.Title}") + ".mp3");
-        await using var source = await response.Content.ReadAsStreamAsync(cancellationToken);
-        await using var target = File.Create(path);
-        await source.CopyToAsync(target, cancellationToken);
-        return path;
+        var contentType = response.Content.Headers.ContentType?.MediaType;
+        await using var source = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+        return await OnlineFileHelper.SaveAsync(source, directory, $"{track.Artist} - {track.Title}", url, contentType, cancellationToken).ConfigureAwait(false);
     }
 
-    private static string Sanitize(string name)
+    private static string? GetString(JsonElement element, string property)
     {
-        var invalid = Path.GetInvalidFileNameChars();
-        var chars = name.Select(c => invalid.Contains(c) ? '_' : c).ToArray();
-        return new string(chars).Trim().TrimEnd('.');
+        if (!element.TryGetProperty(property, out var value)) return null;
+        return value.ValueKind switch
+        {
+            JsonValueKind.String => value.GetString(),
+            JsonValueKind.Number => value.ToString(),
+            _ => null
+        };
     }
-
-    private static string? GetString(JsonElement element, string property) =>
-        element.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
 }

@@ -72,19 +72,23 @@ public sealed class BassPlayerEngine : IPlayerEngine
         }
     }
 
-    public void Load(Song song)
+    public bool Load(Song song)
     {
         FreeStream();
         _song = song;
-        _stream = Bass.CreateStream(song.Path, 0, 0, BassFlags.Default);
+        _stream = IsRemote(song.Path)
+            ? Bass.CreateStream(song.Path, 0, BassFlags.Default, null, IntPtr.Zero)
+            : Bass.CreateStream(song.Path, 0, 0, BassFlags.Default);
         if (_stream == 0)
         {
-            Failed?.Invoke(this, $"无法打开文件（{Bass.LastError}）");
-            return;
+            Failed?.Invoke(this, $"无法打开音频（{Bass.LastError}）");
+            return false;
         }
         var length = Bass.ChannelGetLength(_stream, PositionFlags.Bytes);
         var seconds = length > 0 ? Bass.ChannelBytes2Seconds(_stream, length) : 0;
-        _duration = seconds > 0 ? TimeSpan.FromSeconds(seconds) : TimeSpan.Zero;
+        _duration = seconds > 0
+            ? TimeSpan.FromSeconds(seconds)
+            : (song.DurationMs > 0 ? TimeSpan.FromMilliseconds(song.DurationMs) : TimeSpan.Zero);
         Bass.ChannelSetSync(_stream, SyncFlags.End, 0, _endSync);
         Bass.ChannelSetAttribute(_stream, ChannelAttribute.Volume, (float)_volume);
         ApplyEqToStream();
@@ -92,7 +96,12 @@ public sealed class BassPlayerEngine : IPlayerEngine
         _isPlaying = false;
         Opened?.Invoke(this, EventArgs.Empty);
         SnapshotChanged?.Invoke(this, EventArgs.Empty);
+        return true;
     }
+
+    private static bool IsRemote(string path) =>
+        path.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+        path.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
 
     public void Play()
     {

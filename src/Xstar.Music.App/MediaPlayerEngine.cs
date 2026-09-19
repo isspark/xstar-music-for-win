@@ -31,11 +31,12 @@ public sealed class MediaPlayerEngine : IPlayerEngine
     public event EventHandler? Ended;
     public event EventHandler<string>? Failed;
 
-    public void Load(Song song)
+    public bool Load(Song song)
     {
         _song = song;
         _player.Open(new Uri(song.Path));
         SnapshotChanged?.Invoke(this, EventArgs.Empty);
+        return true;
     }
 
     public void Play()

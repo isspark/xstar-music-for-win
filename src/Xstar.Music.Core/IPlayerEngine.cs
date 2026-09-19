@@ -15,7 +15,8 @@ public interface IPlayerEngine : IDisposable
     event EventHandler? Opened;
     event EventHandler? Ended;
     event EventHandler<string>? Failed;
-    void Load(Song song);
+    /// <summary>Loads the song. Returns false when the source could not be opened synchronously.</summary>
+    bool Load(Song song);
     void Play();
     void Pause();
     void Stop();

@@ -24,6 +24,7 @@ public sealed class VisualizerEngine : IDisposable
     private double _totalTimeMs;  // cumulative time since engine started
     private float _bassEnergyEma;
     private DateTime _lastFrame = DateTime.Now;
+    private bool _wasPlaying;
 
     public IReadOnlyList<IVisualizerRenderer> AllRenderers => _allRenderers;
 
@@ -39,7 +40,7 @@ public sealed class VisualizerEngine : IDisposable
         };
         _timer.Tick += OnTick;
 
-        // Register all 7 renderers
+        // Register all renderers
         _allRenderers.Add(new BarsRenderer());
         _allRenderers.Add(new RadialRenderer());
         _allRenderers.Add(new WaveRenderer());
@@ -47,6 +48,8 @@ public sealed class VisualizerEngine : IDisposable
         _allRenderers.Add(new GalaxyRenderer());
         _allRenderers.Add(new NebulaRenderer());
         _allRenderers.Add(new AuroraRenderer());
+        _allRenderers.Add(new RibbonRenderer());
+        _allRenderers.Add(new FireworksRenderer());
     }
 
     /// <summary>Build / rebuild the render target bitmap. Call when Stage size changes.</summary>
@@ -86,9 +89,21 @@ public sealed class VisualizerEngine : IDisposable
         _bassEnergyEma = 0;
         _lastBeatTimeMs = 0;
         _totalTimeMs = 0;
+        _wasPlaying = false;
+
+        // 进入可视化时先画一帧静止形态（例如光轨的水平线），即便当前处于暂停
+        RenderRest();
 
         _timer.Interval = TimeSpan.FromMilliseconds(reduceMotion ? 100 : 33);
         _timer.Start();
+    }
+
+    /// <summary>渲染一帧“静止”数据，让渲染器回到静态形态（无音频时）。</summary>
+    private void RenderRest()
+    {
+        _renderer?.Render(new VisualizerFrame(
+            Array.Empty<float>(), Array.Empty<float>(),
+            0f, 0f, 0f, false, AccentColor, BackgroundColor, 0.0));
     }
 
     /// <summary>Stop the render loop and freeze the last frame.</summary>
@@ -110,9 +125,15 @@ public sealed class VisualizerEngine : IDisposable
         if (_bitmap is null || _renderer is null) return;
         if (!_player.Snapshot.IsPlaying)
         {
-            // Keep last frame, but refresh to keep UI thread alive minimally
+            // 播放停止时补一帧静止形态，让渲染器回到静态（光轨回到水平线）
+            if (_wasPlaying)
+            {
+                _wasPlaying = false;
+                RenderRest();
+            }
             return;
         }
+        _wasPlaying = true;
 
         var now = DateTime.Now;
         double dtMs = (now - _lastFrame).TotalMilliseconds;

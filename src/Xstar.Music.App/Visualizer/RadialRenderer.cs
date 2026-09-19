@@ -4,9 +4,10 @@ using System.Windows.Media.Imaging;
 namespace Xstar.Music.App.Visualizer;
 
 /// <summary>
-/// 圆环频谱：彩虹光柱从主环向外辐射，内侧双圈细密刻度，
-/// 中心品红辉光，沿环游走的高光星点，beat 时喷发飞散粒子。
-/// 帧间衰减制造光迹拖尾。
+/// 彩虹针柱环：基环上是一根根独立的径向圆角细柱，柱长随频谱能量伸缩，
+/// 安静处收缩成圆点刻度；色相沿圆周固定铺开（顶部红 → 顺时针
+/// 橙黄绿青蓝紫品红），不随时间转动。底部左右两团氛围辉光
+/// （左紫蓝 / 右红橙黄）。柱体位置固定，帧间衰减只留下短促光迹。
 /// </summary>
 public sealed class RadialRenderer : IVisualizerRenderer
 {
@@ -15,40 +16,28 @@ public sealed class RadialRenderer : IVisualizerRenderer
     public bool IsHardwareCompatible => true;
 
     private WriteableBitmap? _bmp;
-    private readonly Random _rng = new(9);
-    private float[]? _levels;
-    private float[]? _bandMax;
     private float[]? _raw;
-    private float[]? _bled;
-    private double _hueShift;
-    private double _starPhase;
+    private float[]? _levels;
+    private float _globalPeak;   // 全局共享 AGC 峰值：柱长随真实能量错落
+    private float _bassEma;
+    private float _bassSlow;
+    private float _pulse;      // 节奏脉冲包络：起音冲高、随后回落
 
-    private const int BarCount = 240;
-    private const int SparkCount = 64;
-    private const double AngleOffset = Math.PI / 2; // 低频置于底部，左右镜像对称
-    private Spark[]? _sparks;
+    private const int BarCount = 176;
+    private const double AngleStart = -Math.PI / 2; // 第一柱（最低频）在正上方，顺时针铺开
 
-    private struct Spark
-    {
-        public float Angle;
-        public float R;
-        public float Vr;
-        public float Life;
-        public float MaxLife;
-        public double Hue;
-    }
+    // 沿环色相分布的关键点（方位角 → 色相），拟合参考图：
+    // 顶红、右中青、底部品红、左中绿。两段之间线性插值。
+    private static readonly double[] HueAz = { 0, 45, 90, 135, 180, 225, 270, 315, 360 };
+    private static readonly double[] HueVal = { 0, 45, 175, 250, 305, 385, 480, 530, 720 };
 
     public void Initialize(WriteableBitmap bitmap)
     {
         _bmp = bitmap;
+        _raw = new float[BarCount];
         _levels = new float[BarCount];
-        _bandMax = new float[BarCount];
-        _raw = new float[BarCount / 2];
-        _bled = new float[BarCount / 2];
-        _sparks = new Spark[SparkCount];
-        for (int i = 0; i < SparkCount; i++) _sparks[i].Life = 0;
-        _hueShift = 0;
-        _starPhase = 0;
+        _globalPeak = 0;
+        _bassEma = _bassSlow = _pulse = 0;
 
         bitmap.Lock();
         try { RendererUtils.ClearLocked(bitmap, RendererUtils.DefaultBackground); }
@@ -66,258 +55,167 @@ public sealed class RadialRenderer : IVisualizerRenderer
             int cx = w / 2, cy = h / 2;
             int minDim = Math.Min(w, h);
 
-            float ringR = minDim * 0.235f;
-            float maxOut = minDim * 0.24f;
-            float innerLen = minDim * 0.038f;
-
-            // 帧间衰减 → 光柱收缩时留下渐隐光迹（融入主题背景色）
-            RendererUtils.DecayToLocked(_bmp, frame.Background, 0.80f);
+            // 帧间衰减 → 柱收缩时残留极短光迹（融入主题背景色）
+            RendererUtils.DecayToLocked(_bmp, frame.Background, 0.60f);
 
             var spectrum = frame.Spectrum;
             if (spectrum.Length == 0) return;
 
             float dt = (float)frame.DeltaTimeMs / 1000f;
-            _hueShift += frame.DeltaTimeMs * 0.02;
-            _starPhase += dt;
-
             bool beat = frame.BeatDetected;
-            _levels ??= new float[BarCount];
-            _bandMax ??= new float[BarCount];
 
-            // 中心保持空心（深色径向暗角，仅用 corner glow 营造氛围）
-            var edgeBlue = RendererUtils.HslToRgb(235, 0.8, 0.4);
-            RendererUtils.GlowLocked(_bmp, (int)(w * 0.12), (int)(h * 0.15), minDim * 0.28f,
-                edgeBlue.R, edgeBlue.G, edgeBlue.B, 0.05f, 2);
-            RendererUtils.GlowLocked(_bmp, (int)(w * 0.88), (int)(h * 0.85), minDim * 0.28f,
-                edgeBlue.R, edgeBlue.G, edgeBlue.B, 0.05f, 2);
+            // 自检测节奏脉冲：低频能量高于其缓慢平均 → 起音，整圈随节拍轻跳。
+            _bassEma += (frame.BassEnergy - _bassEma) * (1f - MathF.Exp(-dt * 9f));
+            _bassSlow += (frame.BassEnergy - _bassSlow) * (1f - MathF.Exp(-dt * 0.8f));
+            float ratio = _bassSlow > 1e-4f ? _bassEma / _bassSlow : 1f;
+            float attack = Math.Clamp((ratio - 1.10f) * 2.2f, 0f, 1f);
+            attack = MathF.Max(attack, Math.Clamp((_bassEma - _bassSlow) * 3f, 0f, 1f));
+            _pulse = MathF.Max(_pulse - dt * 3f, attack);
+            if (beat) _pulse = 1f;
 
-            // ── 频率域采样 → 借光 → 高低音穿插映射 → AGC ────────────────────
-            // 频谱沿圆周镜像铺开（第 i 柱与对侧柱同源），且高低频段在圆周上
-            // 交替穿插：低频（鼓点）每隔一柱均匀分布到整圈，高频填在中间。
-            const int halfBars = BarCount / 2;
-            const float UsableFrac = 0.75f;   // 只取前 75% 频段（约 ≤10kHz），更高段能量恒≈0
+            float baseR = minDim * 0.275f * (1f + _pulse * 0.04f);
+            float maxLen = minDim * 0.155f;
+
+            // ── 底部氛围辉光：左紫蓝 / 右红橙黄（参考图），随低频轻微涨落 ──
+            float amb = 0.85f + _bassEma * 0.9f + _pulse * 0.25f;
+            RendererUtils.GlowLocked(_bmp, (int)(w * 0.05), (int)(h * 1.00), minDim * 0.40f,
+                190, 50, 255, 0.18f * amb, 3);
+            RendererUtils.GlowLocked(_bmp, (int)(w * 0.24), (int)(h * 1.04), minDim * 0.37f,
+                50, 80, 255, 0.13f * amb, 3);
+            RendererUtils.GlowLocked(_bmp, (int)(w * 0.92), (int)(h * 0.95), minDim * 0.40f,
+                255, 50, 70, 0.16f * amb, 3);
+            RendererUtils.GlowLocked(_bmp, (int)(w * 1.05), (int)(h * 1.01), minDim * 0.38f,
+                255, 165, 30, 0.22f * amb, 3);
+
+            // ── 频率域采样 → 全局 AGC → 帧间平滑 ─────────────────────────
+            // 频谱沿环顺序铺开：最低频在顶部红区，顺时针频率升高。
+            const float UsableFrac = 0.75f;   // 只取前 75% 频段（约 ≤10kHz）
             int usableBands = Math.Max(8, (int)(spectrum.Length * UsableFrac));
 
-            // 1) 按频率顺序取半环能量（k=0 最低频 → k=halfBars-1 最高频）
-            float[] freq = _raw ??= new float[halfBars];
-            for (int k = 0; k < halfBars; k++)
+            _raw ??= new float[BarCount];
+            _levels ??= new float[BarCount];
+
+            // 1) 重采样 + 高频预加重，同时统计本帧全局峰值
+            float global = 0f;
+            for (int i = 0; i < BarCount; i++)
             {
-                float u = (float)k / halfBars;
+                float u = (float)i / BarCount;
                 // 角度压缩：高频段映射得更密，中低频铺满更宽频带
-                float ft = MathF.Pow(u, 1.25f);
-                float fi = ft * usableBands;
+                float fi = MathF.Pow(u, 1.35f) * usableBands;
                 int i0 = Math.Min((int)fi, spectrum.Length - 1);
                 int i1 = Math.Min(i0 + 1, spectrum.Length - 1);
                 float frac = fi - i0;
                 float v = spectrum[i0] * (1 - frac) + spectrum[i1] * frac;
 
-                // 高频预加重（弱补偿，避免把安静频段恒定抬起）
-                v = Math.Clamp(v * (1f + u * 0.9f), 0f, 1f);
-                freq[k] = v < 0.03f ? 0f : v;
+                // 高频预加重（弱补偿，安静频段不抬起）
+                v = Math.Clamp(v * (1f + u * 0.8f), 0f, 1f);
+                v = v < 0.03f ? 0f : v;
+                _raw[i] = v;
+                if (v > global) global = v;
             }
 
-            // 2) 相邻频段“借光”（在频率域做：低频 → 高频单向传播，弱权重）
-            float[] bled = _bled ??= new float[halfBars];
-            for (int k = 0; k < halfBars; k++)
-            {
-                float v = freq[k];
-                if (k >= 1) v = MathF.Max(v, freq[k - 1] * 0.32f);
-                if (k >= 2) v = MathF.Max(v, freq[k - 2] * 0.13f);
-                if (k >= 3) v = MathF.Max(v, freq[k - 3] * 0.05f);
-                float borrowGain = 0.55f + 0.20f * k / halfBars;
-                bled[k] = MathF.Min(1f, MathF.Max(freq[k], v * borrowGain));
-            }
-
-            // 3) 高低音穿插：半环位置 t 偶数取低频段、奇数取高频段，
-            //    对侧镜像同源，鼓点即可在整圈均匀跳动。
+            // 2) 全局 AGC：所有柱共用同一个缓慢峰值，安静段落就只剩点刻度，
+            //    柱长差异真实保留（参考图错落的针柱，而不是等高栅栏）。
+            if (global > _globalPeak) _globalPeak += (global - _globalPeak) * 0.5f;
+            else _globalPeak *= 0.996f;
+            float peakCeiling = Math.Max(_globalPeak, 0.38f);
             for (int i = 0; i < BarCount; i++)
             {
-                int t = Math.Min(i, BarCount - 1 - i);
-                int pair = t / 2;
-                int k = (t & 1) == 0 ? pair : halfBars - 1 - pair;
-                float v = bled[k];
-
-                // AGC：快攻击、中速释放（≈4 秒峰值减半）
-                if (v > _bandMax[i]) _bandMax[i] += (v - _bandMax[i]) * 0.45f;
-                else _bandMax[i] *= 0.992f;
-                float ceiling = Math.Max(_bandMax[i], 0.16f);
-                float norm = Math.Clamp(v / ceiling, 0f, 1f);
-
-                // 较高门限：安静柱回到 0，只有真实起伏才抬起；gamma 接近线性
-                norm = norm < 0.09f ? 0f : MathF.Pow(norm, 0.9f);
-                norm = Math.Clamp(norm, 0f, 1f);
-
-                _levels[i] += (norm - _levels[i]) * 0.45f;
+                float norm = Math.Clamp(_raw[i] / peakCeiling, 0f, 1f);
+                // 门限 + gamma：弱柱收成刻度点，强冲击才拉成长针
+                norm = norm < 0.10f ? 0f : MathF.Pow(norm, 1.55f);
+                _levels[i] += (norm - _levels[i]) * 0.55f;
             }
 
-            float beatBoost = beat ? 1.12f : 1f;
-
-            // ── 内侧两圈细密刻度（先画，处于最暗层）────────────────────────
+            // ── 径向圆角针柱 ──────────────────────────────────────────────
+            float beatGain = 1f + _pulse * 0.45f;
             for (int i = 0; i < BarCount; i++)
             {
-                double angle = (double)i / BarCount * Math.PI * 2 + AngleOffset;
-                double cosA = Math.Cos(angle), sinA = Math.Sin(angle);
-                double hue = BarHue(i);
-                float v = _levels[i];
+                float v = Math.Clamp(_levels[i] * beatGain, 0f, 1f);
+                double a = AngleStart + (double)i / BarCount * Math.PI * 2;
+                float ux = (float)Math.Cos(a);
+                float uy = (float)Math.Sin(a);
 
-                var tick1 = RendererUtils.HslToRgb(hue, 0.85, 0.38);
-                var tick2 = RendererUtils.HslToRgb(hue, 0.7, 0.26);
+                // 零能量也保留 2px 圆头刻度，形成参考图里的“点环”
+                float len = 2f + v * maxLen;
+                double hue = RingHue((double)i / BarCount);
+                var col = RendererUtils.HslToRgb(hue, 0.95, 0.57 + 0.20 * v);
 
-                float r1a = ringR * 0.72f, r1b = r1a - (2f + v * 7f);
-                RadialSegment(_bmp, cx, cy, r1a, r1b, cosA, sinA, tick1, tick1, 1);
-
-                float r2a = ringR * 0.56f, r2b = r2a - (1.5f + v * 4f);
-                RadialSegment(_bmp, cx, cy, r2a, r2b, cosA, sinA, tick2, tick2, 1);
+                DrawCapsuleLocked(_bmp, cx, cy, ux, uy, baseR, baseR + len,
+                    col.R, col.G, col.B);
             }
-
-            // ── 主环连续光环（彩虹细点 + 间隔辉光）────────────────────────
-            int ringDots = BarCount * 2;
-            for (int j = 0; j < ringDots; j++)
-            {
-                double angle = (double)j / ringDots * Math.PI * 2;
-                int x = cx + (int)Math.Round(Math.Cos(angle) * ringR);
-                int y = cy + (int)Math.Round(Math.Sin(angle) * ringR);
-                double hue = BarHue(j / 2);
-                var rc = RendererUtils.HslToRgb(hue, 0.95, 0.72);
-                RendererUtils.FillRectLocked(_bmp, x, y, 2, 2, rc.R, rc.G, rc.B);
-                if ((j & 3) == 0)
-                    RendererUtils.GlowLocked(_bmp, x, y, 3f, rc.R, rc.G, rc.B, 0.45f);
-            }
-
-            // ── 彩虹光柱：外射长柱 + 内射短柱 ──────────────────────────────
-            for (int i = 0; i < BarCount; i++)
-            {
-                float v = _levels[i];
-                if (v < 0.01f) continue;
-
-                double angle = (double)i / BarCount * Math.PI * 2 + AngleOffset;
-                double cosA = Math.Cos(angle), sinA = Math.Sin(angle);
-                double hue = BarHue(i);
-
-                var cBase = RendererUtils.HslToRgb(hue, 0.95, 0.60);
-                var cTip = RendererUtils.HslToRgb(hue, 1.0, 0.82);
-                var cInner = RendererUtils.HslToRgb(hue, 0.85, 0.42);
-
-                float outLen = v * maxOut * beatBoost;
-                int tx = cx + (int)Math.Round(cosA * (ringR + outLen));
-                int ty = cy + (int)Math.Round(sinA * (ringR + outLen));
-
-                // 外射发光柱（基部 → 尖端，泛白亮）
-                RadialSegment(_bmp, cx, cy, ringR + 1, ringR + outLen, cosA, sinA, cBase, cTip, 2);
-                // 柱身中段辉光
-                float midR = ringR + outLen * 0.55f;
-                int mx = cx + (int)Math.Round(cosA * midR);
-                int my = cy + (int)Math.Round(sinA * midR);
-                RendererUtils.GlowLocked(_bmp, mx, my, 3f, cBase.R, cBase.G, cBase.B, 0.35f);
-                // 尖端亮斑
-                RendererUtils.GlowLocked(_bmp, tx, ty, 5f, cTip.R, cTip.G, cTip.B, 0.95f);
-
-                // 内射短柱
-                RadialSegment(_bmp, cx, cy, ringR - 1, ringR - v * innerLen, cosA, sinA, cBase, cInner, 1);
-            }
-
-            // ── 沿环游走的高光星点 ─────────────────────────────────────────
-            DrawTravelStar(_bmp, cx, cy, ringR, _starPhase * 0.55, 165); // 青绿
-            DrawTravelStar(_bmp, cx, cy, ringR, -_starPhase * 0.4 + 2.1, 315); // 品红
-
-            // ── beat 喷发 + 飞散粒子更新 ───────────────────────────────────
-            if (beat) SpawnSparks(ringR);
-            UpdateSparks(_bmp, cx, cy, dt);
         }
         finally { RendererUtils.FlushLocked(_bmp); }
     }
 
-    private double BarHue(double index0)
-        => ((index0 / BarCount) * 360.0 + _hueShift) % 360;
-
-    private static void DrawTravelStar(WriteableBitmap bmp, int cx, int cy, float ringR, double phase, double hue)
+    /// <summary>方位比例 u（0=正上方，顺时针）→ 沿环固定彩虹色相。</summary>
+    private static double RingHue(double u)
     {
-        double a = phase;
-        int x = cx + (int)Math.Round(Math.Cos(a) * ringR);
-        int y = cy + (int)Math.Round(Math.Sin(a) * ringR);
-        var sc = RendererUtils.HslToRgb(hue, 0.9, 0.85);
-        RendererUtils.GlowLocked(bmp, x, y, 11f, sc.R, sc.G, sc.B, 1.0f);
-        RendererUtils.GlowLocked(bmp, x, y, 3.5f, 255, 255, 255, 0.95f);
-    }
-
-    private void SpawnSparks(float ringR)
-    {
-        if (_sparks is null) return;
-        for (int n = 0; n < 10; n++)
+        double az = u * 360.0;
+        for (int k = 0; k < HueAz.Length - 1; k++)
         {
-            for (int s = 0; s < SparkCount; s++)
+            if (az <= HueAz[k + 1])
             {
-                if (_sparks[s].Life <= 0)
-                {
-                    float a = (float)(_rng.NextDouble() * Math.PI * 2);
-                    float life = 0.45f + (float)_rng.NextDouble() * 0.6f;
-                    _sparks[s] = new Spark
-                    {
-                        Angle = a,
-                        R = ringR + 2,
-                        Vr = 70f + (float)_rng.NextDouble() * 130f,
-                        Life = life,
-                        MaxLife = life,
-                        Hue = _rng.NextDouble() * 360
-                    };
-                    break;
-                }
+                double t = (az - HueAz[k]) / (HueAz[k + 1] - HueAz[k]);
+                return (HueVal[k] + (HueVal[k + 1] - HueVal[k]) * t) % 360.0;
             }
         }
-    }
-
-    private void UpdateSparks(WriteableBitmap bmp, int cx, int cy, float dt)
-    {
-        if (_sparks is null) return;
-        for (int s = 0; s < SparkCount; s++)
-        {
-            var sp = _sparks[s];
-            if (sp.Life <= 0) continue;
-
-            sp.Life -= dt;
-            sp.R += sp.Vr * dt;
-            sp.Vr *= 0.985f;
-            _sparks[s] = sp;
-            if (sp.Life <= 0) continue;
-
-            int x = cx + (int)Math.Round(Math.Cos(sp.Angle) * sp.R);
-            int y = cy + (int)Math.Round(Math.Sin(sp.Angle) * sp.R);
-            var c = RendererUtils.HslToRgb(sp.Hue, 0.9, 0.75);
-            float fade = sp.Life / sp.MaxLife;
-            RendererUtils.GlowLocked(bmp, x, y, 2.5f, c.R, c.G, c.B, 0.85f * fade);
-        }
+        return 0;
     }
 
     /// <summary>
-    /// Draws a width-px radial segment by interpolating radius [rA..rB] (either direction)
-    /// and colour [ca..cb] along a fixed angle.
+    /// 沿径向画约 3px 宽的圆角（胶囊）细柱：中心线每 1px 落一个 3×3 戳记，
+    /// 戳记内像素按“到柱中心线的垂直距离”做 alpha 软边——柱身抗锯齿，
+    /// 首尾戳记天然形成圆头。颜色与背景做覆盖混合以保持针柱鲜明。
     /// </summary>
-    private static void RadialSegment(WriteableBitmap bmp, int cx, int cy,
-        float rA, float rB, double cosA, double sinA, Color ca, Color cb, int width)
+    private static unsafe void DrawCapsuleLocked(WriteableBitmap bmp,
+        float cx, float cy, float ux, float uy, float r0, float r1,
+        byte cr, byte cg, byte cb)
     {
-        float dist = MathF.Abs(rB - rA);
-        int steps = Math.Max(1, (int)dist);
-        int half = width / 2;
-        for (int k = 0; k <= steps; k++)
+        int w = bmp.PixelWidth, h = bmp.PixelHeight, stride = bmp.BackBufferStride;
+        byte* basePtr = (byte*)bmp.BackBuffer;
+
+        // 柱身法线（切向单位向量）
+        float nx = -uy, ny = ux;
+
+        int steps = (int)MathF.Ceiling(r1 - r0);
+        for (int t = 0; t <= steps; t++)
         {
-            float t = k / (float)steps;
-            float rad = rA + (rB - rA) * t;
-            int x = cx + (int)Math.Round(cosA * rad);
-            int y = cy + (int)Math.Round(sinA * rad);
-            byte r = (byte)(ca.R * (1 - t) + cb.R * t);
-            byte g = (byte)(ca.G * (1 - t) + cb.G * t);
-            byte bcol = (byte)(ca.B * (1 - t) + cb.B * t);
-            RendererUtils.FillRectLocked(bmp, x - half, y - half, width, width, r, g, bcol);
+            float rr = r0 + t;
+            int px = (int)MathF.Round(cx + ux * rr);
+            int py = (int)MathF.Round(cy + uy * rr);
+
+            for (int dy = -1; dy <= 1; dy++)
+            {
+                int y = py + dy;
+                if (y < 0 || y >= h) continue;
+                byte* row = basePtr + y * stride;
+                for (int dx = -1; dx <= 1; dx++)
+                {
+                    int x = px + dx;
+                    if (x < 0 || x >= w) continue;
+
+                    // 像素中心到柱中心线的垂直距离
+                    float dist = MathF.Abs(dx * nx + dy * ny);
+                    // 柱芯实、1px 软边半透；超出戳记宽度的角点丢弃
+                    float a = dist <= 0.55f ? 1f : dist <= 1.45f ? 0.5f : 0f;
+                    if (a <= 0f) continue;
+
+                    byte* ptr = row + x * 4;
+                    float ia = 1f - a;
+                    ptr[0] = (byte)(ptr[0] * ia + cb * a);
+                    ptr[1] = (byte)(ptr[1] * ia + cg * a);
+                    ptr[2] = (byte)(ptr[2] * ia + cr * a);
+                    ptr[3] = 255;
+                }
+            }
         }
     }
 
     public void Cleanup()
     {
         _bmp = null;
-        _levels = null;
-        _bandMax = null;
         _raw = null;
-        _bled = null;
-        _sparks = null;
+        _levels = null;
     }
 }

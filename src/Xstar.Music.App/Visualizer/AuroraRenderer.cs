@@ -1,9 +1,14 @@
-using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 
 namespace Xstar.Music.App.Visualizer;
 
+/// <summary>
+/// 极光帷幕：夜幕下多根粉 / 品红 / 紫 / 蓝色光柱自地平线升起，
+/// 柱内光丝持续向上流动，帧间衰减拉出纵向光轨；频谱驱动每根帷幕的
+/// 高低明暗，鼓点让整片光幕呼吸增亮，顶部是闪烁的星空。
+/// 色板以极光粉紫蓝为主，轻微跟随主题强调色。
+/// </summary>
 public sealed class AuroraRenderer : IVisualizerRenderer
 {
     public string StyleId => "aurora";
@@ -11,134 +16,235 @@ public sealed class AuroraRenderer : IVisualizerRenderer
     public bool IsHardwareCompatible => true;
 
     private WriteableBitmap? _bmp;
+    private double _time;
+    private Star[]? _stars;
+    private float[]? _topEase;
     private readonly Random _rng = new(21);
-    private double _phase;
+
+    // ── 帷幕定义：横向位置、宽度、色相、基础高度、倾斜、对应频段 ──────────
+    private readonly Curtain[] _curtains =
+    {
+        new(0.00f, 0.11f, 318, 0.85f,  0.00f, 0.02f),  // 最左缘品红
+        new(0.09f, 0.040f, 222, 0.72f, -0.025f, 0.10f), // 蓝色细束
+        new(0.16f, 0.055f, 248, 0.48f,  0.015f, 0.18f),
+        new(0.29f, 0.050f, 262, 0.34f, -0.01f, 0.30f),  // 远处暗紫
+        new(0.41f, 0.050f, 212, 0.60f,  0.02f, 0.42f),  // 钢青
+        new(0.55f, 0.060f, 270, 0.95f, -0.02f, 0.55f),  // 紫色高束
+        new(0.64f, 0.075f, 292, 1.02f,  0.015f, 0.66f), // 紫粉
+        new(0.73f, 0.085f, 312, 1.03f, -0.01f, 0.78f),  // 粉
+        new(0.83f, 0.095f, 320, 1.02f,  0.02f, 0.88f),  // 品红
+        new(0.94f, 0.12f,  326, 1.00f, -0.015f, 0.96f), // 大片品红
+        new(1.02f, 0.10f,  300, 0.88f,  0.00f, 1.00f),  // 右缘
+    };
+
+    private struct Curtain
+    {
+        public readonly float X, Sigma, Height, Tilt, Bin;
+        public readonly double Hue;
+        public Curtain(float x, float sigma, double hue, float height, float tilt, float bin)
+        { X = x; Sigma = sigma; Hue = hue; Height = height; Tilt = tilt; Bin = bin; }
+    }
+
+    private struct Star
+    {
+        public float X, Y, Phase, Speed;
+        public byte Size;
+    }
 
     public void Initialize(WriteableBitmap bitmap)
     {
         _bmp = bitmap;
-        _phase = 0;
+        _time = 0;
+        _topEase = new float[_curtains.Length];
+        Array.Fill(_topEase, -1f);
+
+        int n = 150;
+        _stars = new Star[n];
+        for (int i = 0; i < n; i++)
+        {
+            // 星点集中在上方夜幕，少量落入中部
+            float fy = MathF.Pow((float)_rng.NextDouble(), 1.5f) * 0.58f;
+            _stars[i] = new Star
+            {
+                X = (float)_rng.NextDouble(),
+                Y = fy,
+                Phase = (float)(_rng.NextDouble() * Math.PI * 2),
+                Speed = 0.5f + (float)_rng.NextDouble() * 2.2f,
+                Size = (byte)(_rng.NextDouble() < 0.12 ? 2 : 1)
+            };
+        }
+
+        bitmap.Lock();
+        try { RendererUtils.ClearLocked(bitmap, RendererUtils.DefaultBackground); }
+        finally { RendererUtils.FlushLocked(bitmap); }
     }
 
     public void Render(VisualizerFrame frame)
     {
-        if (_bmp is null) return;
+        if (_bmp is null || _stars is null) return;
 
         _bmp.Lock();
         try
         {
             int w = _bmp.PixelWidth, h = _bmp.PixelHeight;
 
-            RendererUtils.ClearLocked(_bmp, frame.Background);
-            RendererUtils.DecayToLocked(_bmp, frame.Background, 0.75f);
+            float dt = (float)frame.DeltaTimeMs / 1000f;
+            _time += dt;
+            double t = _time;
 
-            float bass = frame.BassEnergy;
-            float mid = frame.MidEnergy;
-            float treble = frame.TrebleEnergy;
-            _phase += frame.DeltaTimeMs * 0.003f;
+            float bass = frame.BassEnergy, mid = frame.MidEnergy, treble = frame.TrebleEnergy;
+            bool beat = frame.BeatDetected;
 
-            var (baseHue, baseSat, _) = RendererUtils.RgbToHsl(frame.Accent);
+            // 纵向光轨：光丝向上流动，衰减在身后留下拖影
+            RendererUtils.DecayToLocked(_bmp, frame.Background, 0.80f);
 
-            DrawAuroraBand(_bmp, w, h, 0, h * 0.3, 140, bass, baseHue, _phase * 0.6, baseSat);
-            DrawAuroraBand(_bmp, w, h, 1, h * 0.5, 100, mid, (baseHue + 140) % 360, _phase * 0.9, baseSat);
-            DrawAuroraBand(_bmp, w, h, 2, h * 0.72, 80, treble, (baseHue + 260) % 360, _phase * 1.2, baseSat);
+            var (accentHue, _, _) = RendererUtils.RgbToHsl(frame.Accent);
+            var spec = frame.Spectrum;
+            int usable = spec.Length > 0 ? Math.Max(8, (int)(spec.Length * 0.7f)) : 0;
 
-            // Soft ambient auras so the bands read as luminous rather than flat.
-            AmbientAura(_bmp, w, h * 0.3f, baseHue, bass);
-            AmbientAura(_bmp, w, h * 0.5f, (baseHue + 140) % 360, mid);
-            AmbientAura(_bmp, w, h * 0.72f, (baseHue + 260) % 360, treble);
+            float breathe = 0.82f + bass * 0.45f + (beat ? 0.18f : 0f);
 
-            DrawStarField(_bmp, w, h, treble);
-        }
-        finally
-        {
-            RendererUtils.FlushLocked(_bmp);
-        }
-    }
-
-    public void Cleanup() { _bmp = null; }
-
-    private static void AmbientAura(WriteableBitmap bmp, int w, float bandCentre, double hue, float energy)
-    {
-        if (energy < 0.02f) return;
-        var aura = RendererUtils.HslToRgb(hue, 0.75, 0.6);
-        int midY = (int)bandCentre;
-        RendererUtils.GlowLocked(bmp, w / 2, midY, bmp.PixelWidth * 0.30f, aura.R, aura.G, aura.B, 0.10f + energy * 0.10f);
-    }
-
-    private static void DrawAuroraBand(WriteableBitmap bmp, int w, int h, int bandIndex,
-        double bandCentre, double bandThickness, float energy, double hueOffset, double phase, double sat)
-    {
-        if (energy < 0.02f) return;
-
-        double hue = bandIndex switch
-        {
-            0 => hueOffset,
-            1 => (hueOffset + 140) % 360,
-            _ => (hueOffset + 260) % 360
-        };
-
-        double thickness = bandThickness * Math.Clamp(0.4f + energy * 1.8f, 0.2f, 2.2f);
-
-        var bright = RendererUtils.HslToRgb(hue, sat * 0.95, 0.88);
-        var mid = RendererUtils.HslToRgb(hue, sat * 0.7, 0.55);
-        var dim = RendererUtils.HslToRgb(hue, sat * 0.5, 0.22);
-
-        for (int x = 0; x < w; x++)
-        {
-            double t = (double)x / w;
-            double shape = 0.5 * Math.Sin(t * 2.0 * Math.PI + phase)
-                         + 0.3 * Math.Sin(t * 2.0 * Math.PI * 3.0 + phase * 1.4)
-                         + 0.2 * Math.Sin(t * 2.0 * Math.PI * 5.0 + phase * 0.7);
-            double bandY = bandCentre + shape * thickness * 0.4;
-
-            for (int dy = -(int)thickness; dy <= (int)thickness; dy++)
+            // ── 极光帷幕（加法光柱：宽软光晕 + 窄亮光丝）──────────────────
+            for (int c = 0; c < _curtains.Length; c++)
             {
-                double yy = bandY + dy;
-                if (yy < 0 || yy >= h) continue;
+                var cu = _curtains[c];
 
-                double falloff = Math.Exp(-dy * dy / (2 * (thickness * 0.4) * (thickness * 0.4)));
-                if (falloff < 0.01) continue;
-                double intensity = falloff * energy * 2.5;
-                if (intensity < 0.02) continue;
-
-                double dist = Math.Abs(dy) / thickness;
-                byte rr = (byte)(mid.R * (1 - dist) + dim.R * dist * 0.7);
-                byte gg = (byte)(mid.G * (1 - dist) + dim.G * dist * 0.7);
-                byte bb = (byte)(mid.B * (1 - dist) + dim.B * dist * 0.7);
-
-                if (Math.Abs(dy) < thickness * 0.2)
+                // 频段能量 → 帷幕起伏；再叠加整体中低频呼吸
+                float band = 0f;
+                if (usable > 0)
                 {
-                    double coreFalloff = Math.Exp(-dy * dy / (2 * (thickness * 0.1) * (thickness * 0.1)));
-                    rr = (byte)(rr + bright.R * coreFalloff * intensity * 0.6);
-                    gg = (byte)(gg + bright.G * coreFalloff * intensity * 0.6);
-                    bb = (byte)(bb + bright.B * coreFalloff * intensity * 0.6);
+                    int bi = Math.Min((int)(cu.Bin * usable), spec.Length - 1);
+                    band = spec[bi];
                 }
+                float energy = Math.Clamp(
+                    (0.16f + band * 0.95f + mid * 0.28f + bass * 0.14f) * breathe, 0f, 1.25f);
 
-                rr = Math.Clamp(rr, (byte)0, (byte)255);
-                gg = Math.Clamp(gg, (byte)0, (byte)255);
-                bb = Math.Clamp(bb, (byte)0, (byte)255);
+                // 缓慢摇摆 + 顶端倾斜
+                float sway = (float)Math.Sin(t * (0.25 + c * 0.013) + c * 1.7) * 0.018f;
+                float centerX = (cu.X + sway) * w;
+                float targetTop = h * Math.Clamp(cu.Height * (1.02f + bass * 0.32f + band * 0.30f), 0.25f, 1.22f);
+                // 顶端高度缓动：避免频谱抖动让光柱顶端产生水平阶梯拖影
+                float eased = _topEase![c];
+                if (eased < 0f) eased = targetTop;
+                float k = targetTop > eased ? 1f - MathF.Exp(-dt * 9f) : 1f - MathF.Exp(-dt * 4.5f);
+                eased += (targetTop - eased) * k;
+                _topEase[c] = eased;
+                float topH = eased;
+                float sigma = cu.Sigma * w * 0.72f * (0.85f + 0.3f * mid);
 
-                RendererUtils.PutPixelLocked(bmp, x, (int)yy, rr, gg, bb);
+                double hue = BlendHue(cu.Hue, accentHue, 0.22);
+                var soft = RendererUtils.HslToRgb(hue, 0.85, 0.42);
+                var hot = RendererUtils.HslToRgb(hue, 1.0, 0.72);
+
+                DrawCurtain(_bmp, w, h, centerX, topH, sigma, cu.Tilt * w,
+                    soft.R, soft.G, soft.B, hot.R, hot.G, hot.B, energy, t, c * 0.9 + cu.Hue * 0.01);
+            }
+
+            // ── 地平线微光：根部亮感已由帷幕叠加形成，无需额外辉光 ────────
+
+            // ── 顶部星空 ─────────────────────────────────────────────────
+            DrawStars(_bmp, w, h, treble, t);
+        }
+        finally { RendererUtils.FlushLocked(_bmp); }
+    }
+
+    private static unsafe void DrawCurtain(WriteableBitmap bmp, int w, int h,
+        float centerX, float topH, float sigma, float tilt,
+        byte sr, byte sg, byte sb, byte hr, byte hg, byte hb,
+        float energy, double t, double phase)
+    {
+        int stride = bmp.BackBufferStride;
+        byte* basePtr = (byte*)bmp.BackBuffer;
+
+        int lim = Math.Max(4, (int)(sigma * 2.4f));
+        int yStart = Math.Max(0, h - (int)topH);
+
+        // 三条纵向光丝：在帷幕内位置固定，亮度沿柱长尺度缓慢向上流动
+        float raySigma = sigma * 0.24f;
+        float offA = -sigma * 0.55f, offB = sigma * 0.08f, offC = sigma * 0.52f;
+        float ph = (float)phase, tt = (float)t;
+        float s2inv = 1f / (2f * sigma * sigma);
+        float r2inv = 1f / (2f * raySigma * raySigma);
+
+        for (int y = h - 1; y >= yStart; y--)
+        {
+            float up = (h - 1 - y) / Math.Max(1f, topH); // 0 根部 → 1 顶端
+            float xRow = centerX + tilt * up;
+
+            // 根部最亮、向顶端柔化收束至近零（避免平顶）
+            float fade = MathF.Pow(1f - up, 1.25f);
+
+            // 柱体长尺度起伏（缓缓上行的光波，不成珠）
+            float slow = 0.5f + 0.5f * MathF.Sin(up * 5.5f - tt * 1.4f + ph);
+            float body = energy * (fade * 0.98f + 0.02f) * (0.72f + 0.28f * slow);
+
+            // 注：帧间衰减 0.80 下加法输入稳态约放大 5 倍，故输入值需压低
+            float wideV = body * 0.14f;
+
+            float ra = MathF.Pow(0.5f + 0.5f * MathF.Sin(up * 4.2f - tt * 1.8f + ph), 1.4f);
+            float rb = MathF.Pow(0.5f + 0.5f * MathF.Sin(up * 6.0f - tt * 2.2f + ph * 2.3f + 1.7f), 1.6f);
+            float rc = MathF.Pow(0.5f + 0.5f * MathF.Sin(up * 3.4f - tt * 1.3f + ph * 0.5f + 3.3f), 1.5f);
+            float vA = body * (0.02f + ra * 0.15f);
+            float vB = body * (0.03f + rb * 0.17f);
+            float vC = body * (0.02f + rc * 0.13f);
+            if (wideV + vB < 0.004f) continue;
+
+            int xi = (int)xRow;
+            int iA = (int)(xRow + offA) - xi;
+            int iB = (int)(xRow + offB) - xi;
+            int iC = (int)(xRow + offC) - xi;
+            byte* row = basePtr + y * stride + xi * 4;
+            int from = Math.Max(-lim, -xi);
+            int to = Math.Min(lim, w - 1 - xi);
+            for (int dx = from; dx <= to; dx++)
+            {
+                float d2 = dx * dx;
+                float vs = MathF.Exp(-d2 * s2inv) * wideV;
+                float da = dx - iA, db = dx - iB, dc = dx - iC;
+                float vh = MathF.Exp(-(da * da) * r2inv) * vA
+                         + MathF.Exp(-(db * db) * r2inv) * vB
+                         + MathF.Exp(-(dc * dc) * r2inv) * vC;
+                if (vs + vh < 0.004f) continue;
+                byte* px = row + dx * 4;
+                px[0] = (byte)Math.Min(255, px[0] + sb * vs + hb * vh);
+                px[1] = (byte)Math.Min(255, px[1] + sg * vs + hg * vh);
+                px[2] = (byte)Math.Min(255, px[2] + sr * vs + hr * vh);
             }
         }
     }
 
-    private static readonly Random _starRng = new(21);
-    private static Point[]? _starCache;
-
-    private static void DrawStarField(WriteableBitmap bmp, int w, int h, float treble)
+    private void DrawStars(WriteableBitmap bmp, int w, int h, float treble, double t)
     {
-        _starCache ??= Enumerable.Range(0, 80)
-            .Select(_ => new Point(_starRng.Next(w), _starRng.Next(h)))
-            .ToArray();
-
-        foreach (var p in _starCache)
+        if (_stars is null) return;
+        foreach (var s in _stars)
         {
-            float flicker = (float)(0.4 + _starRng.NextDouble() * 0.6) * (0.6f + treble * 1.5f);
-            if (flicker < 0.1f) continue;
-            byte intensity = (byte)Math.Clamp(flicker * 220, 20, 255);
-            RendererUtils.PutPixelLocked(bmp, (int)p.X, (int)p.Y, intensity, intensity, (byte)(intensity + 20));
+            float tw = 0.35f + 0.65f * MathF.Sin(s.Phase + (float)t * s.Speed);
+            float v = Math.Clamp(tw * (0.45f + treble * 0.9f), 0.08f, 1f);
+            int x = (int)(s.X * w), y = (int)(s.Y * h);
+            byte b2 = (byte)(170 * v + 60);
+            byte g2 = (byte)(190 * v + 55);
+            byte r2 = (byte)(210 * v + 45);
+            if (s.Size == 2 && v > 0.55f)
+            {
+                RendererUtils.GlowLocked(bmp, x, y, 2.4f, r2, g2, b2, 0.7f * v);
+                RendererUtils.PutPixelLocked(bmp, x, y, 255, 255, 255);
+            }
+            else
+            {
+                RendererUtils.PutPixelLocked(bmp, x, y, r2, g2, b2);
+            }
         }
+    }
+
+    private static double BlendHue(double a, double b, double t)
+    {
+        double d = ((b - a + 540) % 360) - 180;
+        return (a + d * t + 360) % 360;
+    }
+
+    public void Cleanup()
+    {
+        _bmp = null;
+        _stars = null;
     }
 }
