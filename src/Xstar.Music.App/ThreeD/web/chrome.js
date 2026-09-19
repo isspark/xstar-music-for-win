@@ -34,6 +34,7 @@ export function initChrome(handlers) {
   const qualityButtons = Array.from(document.querySelectorAll("#set-quality button"));
   const bloomBtn = document.getElementById("set-bloom");
   const lyricsToggle = document.getElementById("set-lyrics");
+  const lyricModeButtons = Array.from(document.querySelectorAll("#set-lyricmode button"));
   const sizeInput = document.getElementById("set-size");
   const offxInput = document.getElementById("set-offx");
   const offyInput = document.getElementById("set-offy");
@@ -83,6 +84,15 @@ export function initChrome(handlers) {
   const toggleLyrics = () => { if (handlers.onLyricsToggle) handlers.onLyricsToggle(); };
   lyricsBtn.addEventListener("click", toggleLyrics);
   lyricsToggle.addEventListener("click", toggleLyrics);
+
+  lyricModeButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      const value = button.dataset.v;
+      setLyricModeValue(value);
+      if (handlers.onLyricMode) handlers.onLyricMode(value);
+      persist("lyricMode", value);
+    });
+  });
 
   /* ---------------- shelf controls ---------------- */
 
@@ -209,6 +219,9 @@ export function initChrome(handlers) {
     lyricsToggle.classList.toggle("active", on);
     lyricsToggle.textContent = on ? "开" : "关";
   }
+  function setLyricModeValue(value) {
+    selectSeg(lyricModeButtons, value === "particle" ? "particle" : "default");
+  }
 
   /* ---------------- window chrome ---------------- */
 
@@ -270,6 +283,7 @@ export function initChrome(handlers) {
       setQualityValue(s.quality);
       setBloom(s.bloom !== false);
       setLyricsToggle(s.lyrics !== false);
+      setLyricModeValue(s.lyricMode);
       if (typeof s.shelfSize === "number") sizeInput.value = s.shelfSize;
       if (typeof s.shelfOffsetX === "number") offxInput.value = s.shelfOffsetX;
       if (typeof s.shelfOffsetY === "number") offyInput.value = s.shelfOffsetY;

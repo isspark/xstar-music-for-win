@@ -200,6 +200,139 @@ internal static class DesktopWallpaper
         return new NativeRect { Left = 0, Top = 0, Right = 1920, Bottom = 1080 };
     }
 
+    /* ===================== desktop hit-testing (for empty-desktop drag) ===================== */
+
+    private const int LvmHitTest = 0x1012;
+    private const uint LvhtOnItem = 0x0000000E;
+    private const uint ProcessVmOperation = 0x0008;
+    private const uint ProcessVmRead = 0x0010;
+    private const uint ProcessVmWrite = 0x0020;
+    private const uint MemCommit = 0x1000;
+    private const uint MemRelease = 0x8000;
+    private const uint MemReserve = 0x2000;
+    private const uint PageReadWrite = 0x04;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct LvHitTestInfo
+    {
+        public NativePoint pt;
+        public uint flags;
+        public int iItem;
+        public int iSubItem;
+        public int iGroup;
+    }
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr WindowFromPoint(NativePoint pt);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(uint access, bool inherit, uint processId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr VirtualAllocEx(IntPtr process, IntPtr address, IntPtr size, uint allocationType, uint protect);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool VirtualFreeEx(IntPtr process, IntPtr address, IntPtr size, uint freeType);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool WriteProcessMemory(IntPtr process, IntPtr address, IntPtr buffer, IntPtr size, out IntPtr written);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool ReadProcessMemory(IntPtr process, IntPtr address, IntPtr buffer, IntPtr size, out IntPtr read);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetClassName(IntPtr hWnd, System.Text.StringBuilder lpClassName, int nMaxCount);
+
+    public static string DescribePoint(int x, int y)
+    {
+        var list = DesktopListView();
+        var hwnd = WindowFromPoint(new NativePoint { X = x, Y = y });
+        var sb = new System.Text.StringBuilder(256);
+        GetClassName(hwnd, sb, 256);
+        return $"pt=({x},{y}) hwnd=0x{hwnd:X} class='{sb}' list=0x{list:X} primary={IsOnPrimary(x, y)} " +
+               $"desktop={IsDesktopPoint(x, y)} icon={IsOverDesktopIcon(x, y)}";
+    }
+
+    /// <summary>True when the point lies on the primary monitor.</summary>
+    public static bool IsOnPrimary(int x, int y)
+    {
+        var b = PrimaryMonitorBounds();
+        return x >= b.Left && x < b.Right && y >= b.Top && y < b.Bottom;
+    }
+
+    /// <summary>True when the top-most window at the point is the desktop's icon list view.</summary>
+    public static bool IsDesktopPoint(int x, int y)
+    {
+        var list = DesktopListView();
+        if (list == IntPtr.Zero) return false;
+        var hwnd = WindowFromPoint(new NativePoint { X = x, Y = y });
+        return hwnd == list;
+    }
+
+    /// <summary>True when the point is over a desktop icon (list item) rather than empty space.</summary>
+    public static bool IsOverDesktopIcon(int x, int y)
+    {
+        var list = DesktopListView();
+        if (list == IntPtr.Zero) return false;
+        GetWindowThreadProcessId(list, out var pid);
+        if (pid == 0) return false;
+
+        var process = OpenProcess(ProcessVmOperation | ProcessVmRead | ProcessVmWrite, false, pid);
+        if (process == IntPtr.Zero) return false;
+        var size = Marshal.SizeOf<LvHitTestInfo>();
+        var remote = VirtualAllocEx(process, IntPtr.Zero, (IntPtr)size, MemCommit | MemReserve, PageReadWrite);
+        if (remote == IntPtr.Zero)
+        {
+            CloseHandle(process);
+            return false;
+        }
+
+        var local = Marshal.AllocHGlobal(size);
+        try
+        {
+            var info = new LvHitTestInfo { pt = new NativePoint { X = x, Y = y } };
+            Marshal.StructureToPtr(info, local, false);
+            if (!WriteProcessMemory(process, remote, local, (IntPtr)size, out _)) return false;
+
+            if (SendMessageTimeout(list, LvmHitTest, IntPtr.Zero, remote, 0x0002 /*SMTO_ABORTIFHUNG*/, 100, out _) == IntPtr.Zero)
+                return false;
+
+            if (!ReadProcessMemory(process, remote, local, (IntPtr)size, out _)) return false;
+            var result = Marshal.PtrToStructure<LvHitTestInfo>(local);
+            return (result.flags & LvhtOnItem) != 0;
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(local);
+            VirtualFreeEx(process, remote, IntPtr.Zero, MemRelease);
+            CloseHandle(process);
+        }
+    }
+
+    private static IntPtr DesktopListView()
+    {
+        var progman = FindWindow("Progman", null);
+        var defView = progman != IntPtr.Zero
+            ? FindWindowEx(progman, IntPtr.Zero, "SHELLDLL_DefView", null)
+            : IntPtr.Zero;
+        if (defView == IntPtr.Zero)
+        {
+            EnumWindows((top, _) =>
+            {
+                var view = FindWindowEx(top, IntPtr.Zero, "SHELLDLL_DefView", null);
+                if (view != IntPtr.Zero) defView = view;
+                return true;
+            }, IntPtr.Zero);
+        }
+        return defView == IntPtr.Zero ? IntPtr.Zero : FindWindowEx(defView, IntPtr.Zero, "SysListView32", null);
+    }
+
     private static IntPtr FindWorkerW()
     {
         var progman = FindWindow("Progman", null);

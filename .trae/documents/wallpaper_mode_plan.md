@@ -251,4 +251,31 @@ SetParent(wallpaperHwnd, workerw)
 - **外观跟随**：壁纸不再使用独立的质量/歌词设置，改为直接复用 `ThreeDGetSettingsJson()`（形态 / 粒子 / 背景 / 歌词 / 质量与 3D 模式一致）；移除 `WallpaperQuality` / `WallpaperShowLyrics` 与 `BuildWallpaperSettingsJson`。窗口内 3D 设置变更时 `ThreeDOnSetting` 末尾 `_wallpaperController.PushSettings()` 实时同步。
 - **歌词不滚动**：`PushLyrics` / `PushLyricIndex` / `PushState` / `PushArtwork` 此前只发给窗口内 3D 宿主 `_threeDHost`，壁纸宿主收不到。现 `WallpaperController` 暴露同名方法，`MainWindow` 在原有 8 处推送点同时推给壁纸，`UpdateProgress → UpdateLyricHighlight` 的逐行推进即可驱动壁纸歌词滚动。
 
+### 新增：空白桌面拖拽旋转（不覆盖图标，2026-09-19）
+- 需求：壁纸模式（非交互）下也能拖拽旋转 / 滚轮缩放，但**不得遮挡或拦截桌面图标**，也不用浮到前台全屏窗。
+- 方案：全局低级鼠标钩子 + 桌面图标命中测试。
+  - `DesktopWallpaper` 新增命中测试：`IsOnPrimary`（主屏矩形）、`IsDesktopPoint`（`WindowFromPoint` 命中 `SysListView32`，即桌面图标层）、`IsOverDesktopIcon`（跨进程 `LVM_HITTEST`，在 explorer 进程分配远端缓冲区 + `SendMessageTimeout`，`LVHT_ONITEM` 判定是否落在图标上）、`DescribePoint`（诊断）。
+  - 新增 `WallpaperMouseHook`（`WH_MOUSE_LL`）：仅在 `IsOnPrimary && IsDesktopPoint && !IsOverDesktopIcon` 时介入；左键在空白桌面按下即吞掉（避免框选），拖动超过 3px 阈值后转成 orbit 增量并吞掉后续 move/up；滚轮同理转成 zoom。命中图标、其他窗口、右键全部原样放行（`CallNextHookEx`）。
+  - 接线：`WallpaperController` 构造时创建钩子；仅在 `IsRunning && !Interactive` 时 `Install` + `Enabled=true`，`Stop()` 时 `Uninstall`（交互模式下不安装）。orbit 经 `ThreeDHost.PushOrbit(dx,dy,wheel)` → 桥接消息 `{type:"orbit",dx,dy,wheel}` → `web/app.js` 复用既有 `orbit.targetTheta/targetPhi/radiusTarget`（与窗口内拖拽同一套参数与系数）。
+- 诊断：环境变量 `XSTAR_WALLPAPER_HOOK_DEBUG=1` 时，每次左键按下记录 `DescribePoint` 判定结果到 `wallpaper.log`。
+- **已验证**（模拟输入 + 日志）：空白桌面按下被吞并命中判定 `desktop=True icon=False`；拖拽增量送达 web（`theta 0.00 → 0.46 → 0.59`），滚轮增量送达（`wheel=120`）；交互模式启动日志无 `mouse hook installed`（钩子未安装，符合预期）。
+
+### 新增：无封面时用歌名生成粒子（2026-09-19）
+- 需求：3D 模式的封面粒子云在**没有封面图**（解析失败 / 无内嵌图）时，改用**歌名文字**作为粒子形状。
+- 实现（`web/cover.js`，3D 模式与壁纸共用）：
+  - `makePlaceholder(accent, title)`：无封面时在 512² 画布上把歌名按 CJK 逐字 / 拉丁逐词换行、二分收缩字号至适配 82% 宽 × 78% 高，居中绘制白色文字（accent 描边辉光）+ 暗底 accent 径向微光；空标题回退原装饰横线。
+  - `cover.setTitle(title)`：记录歌名；仅在**非图片模式**下重建文字纹理。
+  - `setImage` 成功进入图片模式；解码失败或收到无 data 的 `artwork`（→ `clearImage()`）则回退文字纹理；`setAccent` 在文字模式下同步重建。
+  - `web/app.js` 的 `state` 分支调用 `cover.setTitle(message.title)`。
+- **已验证**：临时注入 `{type:"state",title:"夜空中最亮的星"}` + 无 data 的 `artwork` 后 `CapturePreviewAsync` 截图，粒子云清晰构成歌名文字（临时注入已移除）。
+
+### 新增：歌词渲染模式（默认 / 粒子，2026-09-19）
+- 需求：新增设置「歌词渲染」= 默认 / 粒子。选「粒子」时当前歌词行渲染进粒子云并隐藏原 3D 歌词文字；无歌词时回退封面/歌名粒子（与上一节一致）。
+- 实现：
+  - 设置键 `lyricMode`（`"default"` / `"particle"`）：`AppState.ThreeDLyricMode` ← `ThreeDSettingsMessage.LyricMode`；`MainWindow` 字段、`LoadAsync` / `SaveSettings` / `ThreeDOnSetting` / `ResetThreeDSettings` / `BuildThreeDSettingsJson` 全部接入（壁纸共用）。
+  - `index.html`：「画面与背景」新增 `#set-lyricmode` 分段控件；`chrome.js` 绑定点击 → `onLyricMode` + `persist("lyricMode")`，`applySettings` 回填选中态。
+  - `cover.js`：新增 `setLyricText(text)`；掩膜优先级 **歌词行 > 封面图 > 歌名**（`refreshCover`），封面纹理改为缓存复用（`imageTexture`）不再互相 dispose。
+  - `app.js`：跟踪 `lyricLines` / `lyricIndex` / `lyricMode`；`syncLyricsUi()` 统一决策——默认模式显示 3D 歌词文字、粒子模式把当前行交给 `cover.setLyricText`，两者按「有歌词且开启」决定歌词按钮态与 now-playing 显隐。
+- **已验证**：注入 `settings{lyricMode:"particle"}` + 歌词（index=1）+ 无封面 `artwork` 后截图，粒子云构成当前行「夜空中最亮的星」且 3D 歌词文字层隐藏（临时注入已移除）；`node --check` 通过；编译 0 error、测试 26/26。
+
 - **W4 待开始**：锁屏 / 全屏应用暂停、多显示器评估、可选开机自启（`--wallpaper` + 启动项）、纯逻辑单测、`installer.iss` 核对。

@@ -133,6 +133,9 @@ const lyricsStage = createLyrics(lyricsScene);
 stage.addOverlayScene(lyricsScene);
 
 let lyricsEnabled = true;
+let lyricMode = "default"; // "default" = 3D text stage; "particle" = current line shapes the cloud
+let lyricLines = [];
+let lyricIndex = 0;
 let bloomEnabled = true;
 let glowMultiplier = 1;
 let particleColorOverride = "";
@@ -142,10 +145,19 @@ let baseBloom = stage.tier.bloomStrength;
 
 lyricsStage.setVisible(true);
 
+function currentLyricLine() {
+  const text = (lyricLines[lyricIndex] || "").trim();
+  return text === "♪" ? "" : text;
+}
+
+/* Reconciles the two lyric renderers: the 3D text stage (default) and the particle mask (粒子). */
 function syncLyricsUi() {
-  const visible = lyricsEnabled && lyricsStage.isVisible();
-  chrome.setLyricsActive(visible);
-  chrome.setNowPlayingVisible(!visible);
+  const hasLyrics = lyricLines.length > 0;
+  lyricsStage.setVisible(lyricsEnabled && lyricMode === "default");
+  cover.setLyricText(lyricsEnabled && lyricMode === "particle" ? currentLyricLine() : null);
+  const on = lyricsEnabled && hasLyrics;
+  chrome.setLyricsActive(on);
+  chrome.setNowPlayingVisible(!on);
 }
 
 const chrome = initChrome({
@@ -157,9 +169,13 @@ const chrome = initChrome({
   },
   onLyricsToggle() {
     lyricsEnabled = !lyricsEnabled;
-    lyricsStage.setVisible(lyricsEnabled);
     syncLyricsUi();
     action("setSetting", { key: "lyrics", value: lyricsEnabled });
+  },
+  onLyricMode(value) {
+    lyricMode = value === "particle" ? "particle" : "default";
+    syncLyricsUi();
+    action("setSetting", { key: "lyricMode", value: lyricMode });
   },
   onSource(kind) {
     action("getLibrary", { kind });
@@ -230,7 +246,7 @@ function applySettings(settings) {
   applyRenderQuality();
 
   lyricsEnabled = settings.lyrics !== false;
-  lyricsStage.setVisible(lyricsEnabled);
+  lyricMode = settings.lyricMode === "particle" ? "particle" : "default";
   syncLyricsUi();
 
   presetIndex = Math.max(0, Math.min(COVER_PRESETS.length - 1, settings.coverPreset | 0));
@@ -296,6 +312,7 @@ onMessage((message) => {
       break;
     case "state":
       chrome.applyState(message);
+      cover.setTitle(message.title);
       setAccent(message.accent);
       break;
     case "settings":
@@ -314,11 +331,23 @@ onMessage((message) => {
       shelf.setDetail(message);
       break;
     case "lyrics":
+      lyricLines = (message.lines || []).map((line) => line.text || "");
+      lyricIndex = 0;
       lyricsStage.setLines(message.lines || []);
       syncLyricsUi();
       break;
     case "lyricIndex":
-      lyricsStage.setActiveIndex(message.index || 0);
+      lyricIndex = message.index || 0;
+      lyricsStage.setActiveIndex(lyricIndex);
+      syncLyricsUi();
+      break;
+    case "orbit":
+      // Camera deltas forwarded from the host when the user drags/scrolls on empty desktop space.
+      if (typeof message.dx === "number") orbit.targetTheta += message.dx * 0.005;
+      if (typeof message.dy === "number")
+        orbit.targetPhi = Math.max(-1.15, Math.min(1.15, orbit.targetPhi + message.dy * 0.005));
+      if (typeof message.wheel === "number" && message.wheel !== 0)
+        orbit.radiusTarget = Math.max(4.5, Math.min(12, orbit.radiusTarget + message.wheel * 0.0025));
       break;
     default:
       break;

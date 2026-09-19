@@ -126,6 +126,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
     private int _threeDCoverPreset;
     private bool _threeDBloom = true;
     private bool _threeDLyrics = true;
+    private string _threeDLyricMode = "default";
     private double _threeDShelfSize = 1.0;
     private double _threeDShelfOffsetX;
     private double _threeDShelfOffsetY;
@@ -705,6 +706,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
                 _threeDCoverPreset = state?.ThreeDCoverPreset ?? 0;
                 _threeDBloom = state?.ThreeDBloom ?? true;
                 _threeDLyrics = state?.ThreeDLyrics ?? true;
+                _threeDLyricMode = state?.ThreeDLyricMode ?? "default";
                 _threeDShelfSize = state?.ThreeDShelfSize is > 0.2 and < 3 ? state.ThreeDShelfSize : 1.0;
                 _threeDShelfOffsetX = state?.ThreeDShelfOffsetX ?? 0;
                 _threeDShelfOffsetY = state?.ThreeDShelfOffsetY ?? 0;
@@ -791,6 +793,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
                 ThreeDCoverPreset = _threeDCoverPreset,
                 ThreeDBloom = _threeDBloom,
                 ThreeDLyrics = _threeDLyrics,
+                ThreeDLyricMode = _threeDLyricMode,
                 ThreeDShelfSize = _threeDShelfSize,
                 ThreeDShelfOffsetX = _threeDShelfOffsetX,
                 ThreeDShelfOffsetY = _threeDShelfOffsetY,
@@ -1739,6 +1742,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
             CoverPreset = _threeDCoverPreset,
             Bloom = _threeDBloom,
             Lyrics = lyrics,
+            LyricMode = _threeDLyricMode,
             ReduceMotion = _reduceMotion,
             ShelfSize = _threeDShelfSize,
             ShelfOffsetX = _threeDShelfOffsetX,
@@ -1934,6 +1938,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
                 case "coverPreset": _threeDCoverPreset = v.GetInt32(); break;
                 case "bloom": _threeDBloom = v.GetBoolean(); break;
                 case "lyrics": _threeDLyrics = v.GetBoolean(); break;
+                case "lyricMode": _threeDLyricMode = v.GetString() ?? _threeDLyricMode; break;
                 case "shelfSize": _threeDShelfSize = v.GetDouble(); break;
                 case "shelfOffsetX": _threeDShelfOffsetX = v.GetDouble(); break;
                 case "shelfOffsetY": _threeDShelfOffsetY = v.GetDouble(); break;
@@ -1968,6 +1973,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
         _threeDCoverPreset = 0;
         _threeDBloom = true;
         _threeDLyrics = true;
+        _threeDLyricMode = "default";
         _threeDShelfSize = 1.0;
         _threeDShelfOffsetX = 0;
         _threeDShelfOffsetY = 0;
@@ -4167,6 +4173,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
         public int ThreeDCoverPreset { get; set; }
         public bool ThreeDBloom { get; set; } = true;
         public bool ThreeDLyrics { get; set; } = true;
+        public string ThreeDLyricMode { get; set; } = "default";
         public double ThreeDShelfSize { get; set; } = 1.0;
         public double ThreeDShelfOffsetX { get; set; }
         public double ThreeDShelfOffsetY { get; set; }

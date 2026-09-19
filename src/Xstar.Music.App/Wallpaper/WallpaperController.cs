@@ -22,6 +22,7 @@ public sealed class WallpaperController : IDisposable
 
     private readonly IPlayerEngine _player;
     private readonly IThreeDActions _actions;
+    private readonly WallpaperMouseHook _mouseHook;
     private WallpaperWindow? _window;
     private HwndSource? _windowSource;
     private ThreeDHost? _host;
@@ -32,6 +33,13 @@ public sealed class WallpaperController : IDisposable
     {
         _player = player;
         _actions = actions;
+        // Empty-desktop drag / wheel is forwarded to the web scene as camera orbit / zoom.
+        _mouseHook = new WallpaperMouseHook(
+            (dx, dy) => _host?.PushOrbit(dx, dy, 0),
+            wheel => _host?.PushOrbit(0, 0, wheel))
+        {
+            Debug = Log
+        };
     }
 
     public bool IsRunning { get; private set; }
@@ -98,6 +106,11 @@ public sealed class WallpaperController : IDisposable
             // the scene �?which is exactly why interaction needs a separate top-level window.
             DesktopWallpaper.FitPrimary(hwnd);
             DesktopWallpaper.ApplyClickThrough(hwnd);
+
+            // Dragging/wheeling on empty desktop space rotates the scene, without covering the icons.
+            _mouseHook.Install();
+            _mouseHook.Enabled = true;
+            Log($"mouse hook installed={_mouseHook.Installed}");
         }
         EnsureTaskbarHook();
         IsRunning = true;
@@ -127,6 +140,7 @@ public sealed class WallpaperController : IDisposable
         if (!IsRunning && _window is null) return;
         Log("stopped");
 
+        _mouseHook.Uninstall();
         var hwnd = _window is null ? IntPtr.Zero : new WindowInteropHelper(_window).Handle;
         _host?.Dispose();
         _host = null;

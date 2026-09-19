@@ -35,6 +35,15 @@ public sealed class ThreeDAudioMessage
     public double DtMs { get; init; }
 }
 
+/// <summary>Camera orbit / zoom delta injected by the host (empty-desktop drag on the wallpaper).</summary>
+public sealed class ThreeDOrbitMessage
+{
+    public string Type => "orbit";
+    public int Dx { get; init; }
+    public int Dy { get; init; }
+    public int Wheel { get; init; }
+}
+
 /// <summary>Album artwork data URI, pushed only when the current cover changes (or on handshake).</summary>
 public sealed class ThreeDArtworkMessage
 {
@@ -111,6 +120,8 @@ public sealed class ThreeDSettingsMessage
     public int CoverPreset { get; init; }
     public bool Bloom { get; init; } = true;
     public bool Lyrics { get; init; } = true;
+    /// <summary>Lyric rendering: "default" (3D text stage) or "particle" (current line shapes the cloud).</summary>
+    public string LyricMode { get; init; } = "default";
     public bool ReduceMotion { get; init; }
     public double ShelfSize { get; init; } = 1.0;
     public double ShelfOffsetX { get; init; }

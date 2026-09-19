@@ -126,6 +126,18 @@ public sealed class ThreeDHost : IDisposable
 
     public void Stop() => _timer.Stop();
 
+    /// <summary>Injects a camera orbit / zoom delta (empty-desktop drag in wallpaper mode).</summary>
+    public void PushOrbit(int dx, int dy, int wheel)
+    {
+        if (_core is null) return;
+        try
+        {
+            _core.PostWebMessageAsJson(JsonSerializer.Serialize(
+                new ThreeDOrbitMessage { Dx = dx, Dy = dy, Wheel = wheel }, ThreeDJson.Options));
+        }
+        catch { /* view torn down */ }
+    }
+
     /// <summary>Debug aid: renders the current page to a PNG (used to verify the 3D scene headlessly).</summary>
     public async Task CapturePreviewAsync(string path)
     {

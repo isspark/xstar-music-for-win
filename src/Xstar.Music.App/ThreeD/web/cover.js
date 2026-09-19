@@ -114,29 +114,94 @@ const FRAG = `
   }
 `;
 
-function makePlaceholder(accent) {
-  const size = 256;
+const FONT = '"Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif';
+
+function hexWithAlpha(hex, alpha) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex || "");
+  const n = m ? parseInt(m[1], 16) : 0x22c55e;
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${alpha})`;
+}
+
+/* Wrap a title into lines that fit `maxWidth`. CJK breaks per character, latin per word. */
+function wrapTokens(ctx, text, maxWidth) {
+  const tokens = text.match(/[A-Za-z0-9'’\-_.&]+|[^\s]/g) || [];
+  const lines = [];
+  let line = "";
+  for (const token of tokens) {
+    const spaced = line && /[A-Za-z0-9'’\-_.&]$/.test(line) && /[A-Za-z0-9'’\-_.&]/.test(token[0]);
+    const test = line ? line + (spaced ? " " : "") + token : token;
+    if (line && ctx.measureText(test).width > maxWidth) {
+      lines.push(line);
+      line = token;
+    } else {
+      line = test;
+    }
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+/* Largest font size (down to a floor) whose wrapped block fits the canvas, then draw it centred. */
+function drawTitle(ctx, text, size, accent) {
+  const maxWidth = size * 0.82;
+  const maxHeight = size * 0.78;
+  const minSize = Math.round(size * 0.09);
+  let fontSize = Math.round(size * 0.9);
+  let lines = [text];
+  while (fontSize > minSize) {
+    ctx.font = `800 ${fontSize}px ${FONT}`;
+    lines = wrapTokens(ctx, text, maxWidth);
+    const blockHeight = lines.length * fontSize * 1.14;
+    const widest = lines.reduce((m, l) => Math.max(m, ctx.measureText(l).width), 0);
+    if (blockHeight <= maxHeight && widest <= maxWidth) break;
+    fontSize -= 2;
+  }
+  ctx.font = `800 ${fontSize}px ${FONT}`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = "#ffffff";
+  ctx.shadowColor = accent || "#22c55e";
+  ctx.shadowBlur = fontSize * 0.4;
+  const lineHeight = fontSize * 1.14;
+  const startY = size / 2 - ((lines.length - 1) * lineHeight) / 2;
+  lines.forEach((line, i) => ctx.fillText(line, size / 2, startY + i * lineHeight));
+  ctx.shadowBlur = 0;
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
+}
+
+/* No artwork: rasterise the track title so the particle cloud forms the song name. */
+function makePlaceholder(accent, title) {
+  const size = 512;
   const canvas = document.createElement("canvas");
   canvas.width = canvas.height = size;
   const ctx = canvas.getContext("2d");
-  ctx.fillStyle = "#0b0d14";
+  ctx.fillStyle = "#080a11";
   ctx.fillRect(0, 0, size, size);
-  const gradient = ctx.createRadialGradient(size * 0.42, size * 0.38, 8, size * 0.5, size * 0.5, size * 0.72);
-  gradient.addColorStop(0, accent);
-  gradient.addColorStop(0.5, "#1d2340");
-  gradient.addColorStop(1, "#08090f");
+  const gradient = ctx.createRadialGradient(size * 0.5, size * 0.44, 8, size * 0.5, size * 0.5, size * 0.75);
+  gradient.addColorStop(0, hexWithAlpha(accent, 0.3));
+  gradient.addColorStop(0.55, "rgba(29,35,64,0.35)");
+  gradient.addColorStop(1, "#06070c");
   ctx.fillStyle = gradient;
   ctx.fillRect(0, 0, size, size);
-  ctx.globalAlpha = 0.5;
-  for (let i = 0; i < 46; i++) {
-    ctx.beginPath();
-    const y = Math.random() * size;
-    ctx.strokeStyle = "rgba(255,255,255,0.12)";
-    ctx.lineWidth = 1;
-    ctx.moveTo(0, y);
-    ctx.lineTo(size, y);
-    ctx.stroke();
+
+  const trimmed = (title || "").trim();
+  if (trimmed) {
+    drawTitle(ctx, trimmed, size, accent);
+  } else {
+    ctx.globalAlpha = 0.5;
+    for (let i = 0; i < 46; i++) {
+      const y = Math.random() * size;
+      ctx.strokeStyle = "rgba(255,255,255,0.12)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(size, y);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
   }
+
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
   return texture;
@@ -176,7 +241,7 @@ export function createCover(scene, grid, accentHex) {
   const pointWorld = SIZE / (grid - 1);
   const material = new THREE.ShaderMaterial({
     uniforms: {
-      uCover: { value: makePlaceholder(accentHex || "#22c55e") },
+      uCover: { value: makePlaceholder(accentHex || "#22c55e", "") },
       uTime: { value: 0 },
       uBass: { value: 0 },
       uMid: { value: 0 },
@@ -210,6 +275,21 @@ export function createCover(scene, grid, accentHex) {
   let currentTexture = material.uniforms.uCover.value;
   let loadToken = 0;
   let accentHexValue = accentHex || "#22c55e";
+  let titleValue = "";
+  let imageTexture = null;
+  let overrideText = null;
+
+  /* Picks the particle mask: an explicit lyric line wins, then the cover, then the song title. */
+  function refreshCover() {
+    const next = overrideText
+      ? makePlaceholder(accentHexValue, overrideText)
+      : imageTexture || makePlaceholder(accentHexValue, titleValue);
+    if (next === currentTexture) return;
+    const previous = currentTexture;
+    material.uniforms.uCover.value = next;
+    currentTexture = next;
+    if (previous && previous !== next && previous !== imageTexture) previous.dispose();
+  }
 
   function setImage(dataUri) {
     const token = ++loadToken;
@@ -223,13 +303,17 @@ export function createCover(scene, grid, accentHex) {
         texture.colorSpace = THREE.SRGBColorSpace;
         texture.minFilter = THREE.LinearFilter;
         texture.magFilter = THREE.LinearFilter;
-        const previous = currentTexture;
-        material.uniforms.uCover.value = texture;
-        currentTexture = texture;
-        if (previous && previous !== texture) previous.dispose();
+        if (imageTexture && imageTexture !== texture) imageTexture.dispose();
+        imageTexture = texture;
+        refreshCover();
       },
       undefined,
-      () => { /* keep the placeholder on decode failure */ }
+      () => {
+        // No decodable cover: keep the title / lyric particle mask.
+        if (token !== loadToken) return;
+        imageTexture = null;
+        refreshCover();
+      }
     );
   }
 
@@ -238,18 +322,31 @@ export function createCover(scene, grid, accentHex) {
     material,
     grid,
     setImage,
+    /* No artwork for the current track: shape the cloud from the song title. */
+    setTitle(title) {
+      const next = title || "";
+      if (next === titleValue) return;
+      titleValue = next;
+      refreshCover();
+    },
+    /* Lyric particle mode: the active line overrides the mask; null falls back to cover / title. */
+    setLyricText(text) {
+      const next = (text || "").trim() || null;
+      if (next === overrideText) return;
+      overrideText = next;
+      refreshCover();
+    },
     clearImage() {
       loadToken++;
-      const previous = currentTexture;
-      const placeholder = makePlaceholder(accentHexValue);
-      material.uniforms.uCover.value = placeholder;
-      currentTexture = placeholder;
-      if (previous && previous !== placeholder) previous.dispose();
+      imageTexture = null;
+      refreshCover();
     },
     setAccent(hex) {
       if (hex) {
+        const changed = hex !== accentHexValue;
         accentHexValue = hex;
         material.uniforms.uAccent.value.set(hex);
+        if (changed && !imageTexture) refreshCover();
       }
     },
     setSizeMultiplier(mul) {
@@ -296,7 +393,8 @@ export function createCover(scene, grid, accentHex) {
     },
     dispose() {
       geometry.dispose();
-      material.uniforms.uCover.value?.dispose();
+      if (currentTexture && currentTexture !== imageTexture) currentTexture.dispose();
+      imageTexture?.dispose();
       material.dispose();
       scene.remove(group);
     },
