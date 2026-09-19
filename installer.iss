@@ -3,7 +3,7 @@
 
 #define MyAppName "Xstar Music"
 #define MyAppExeName "Xstar.Music.App.exe"
-#define MyAppVersion "1.2.0"
+#define MyAppVersion "1.3.0"
 #define MyAppPublisher "Xstar"
 
 ; 可选：把 WebView2 Evergreen 引导程序放到 installer\MicrosoftEdgeWebView2Setup.exe，

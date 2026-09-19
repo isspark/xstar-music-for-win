@@ -4,7 +4,7 @@
 
 import * as THREE from "three";
 
-export const COVER_PRESETS = ["浮雕", "波纹", "球体", "漩涡", "律动"];
+export const COVER_PRESETS = ["浮雕", "波纹", "球体", "漩涡", "律动", "赛博", "虫洞", "极简"];
 
 const SIZE = 4.8;
 const DEPTH = 1.6;
@@ -271,6 +271,46 @@ export function createCover(scene, grid, accentHex) {
   group.add(points);
   scene.add(group);
 
+  // Endless corridor: extra copies of the cloud sharing the same geometry/material, spaced down
+  // -Z and recycled past the camera. Because they are children of `group` they inherit the same
+  // rotation/scale/audio response, so the whole chain reads as one infinitely receding song.
+  let corridor = [points];
+  let corridorSpacing = 9;
+
+  function clearCorridor() {
+    for (let i = 1; i < corridor.length; i++) group.remove(corridor[i]);
+    corridor = [points];
+    points.position.z = 0;
+  }
+
+  function setCorridor(count, spacing) {
+    clearCorridor();
+    corridorSpacing = spacing > 0 ? spacing : 9;
+    for (let i = 1; i < (count | 0); i++) {
+      const copy = new THREE.Points(geometry, material);
+      copy.frustumCulled = false;
+      // Wind the copies on a helix around the flight axis: the camera threads past them instead
+      // of ploughing through the middle of each cloud.
+      const angle = i * 2.399; // golden angle keeps successive copies well spread
+      const radius = 2.1 + (i % 3) * 0.7;
+      copy.position.set(Math.cos(angle) * radius, Math.sin(angle) * radius * 0.7, -i * corridorSpacing);
+      copy.rotation.z = angle;
+      group.add(copy);
+      corridor.push(copy);
+    }
+  }
+
+  /** Pushes the corridor toward the camera, recycling each copy to the back as it passes. */
+  function advanceCorridor(dt, speed, wrapZ) {
+    if (corridor.length < 2) return;
+    const span = corridor.length * corridorSpacing;
+    const step = speed * dt;
+    for (const copy of corridor) {
+      copy.position.z += step;
+      if (copy.position.z > wrapZ) copy.position.z -= span;
+    }
+  }
+
   const loader = new THREE.TextureLoader();
   let currentTexture = material.uniforms.uCover.value;
   let loadToken = 0;
@@ -322,6 +362,8 @@ export function createCover(scene, grid, accentHex) {
     material,
     grid,
     setImage,
+    setCorridor,
+    advanceCorridor,
     /* No artwork for the current track: shape the cloud from the song title. */
     setTitle(title) {
       const next = title || "";

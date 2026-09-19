@@ -6,6 +6,7 @@ import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
 import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
+import { FeedbackPass } from "./feedback.js";
 
 export const QUALITY = {
   eco: { grid: 112, dpr: 0.85, bloom: false, stars: 700, bloomStrength: 0.0 },
@@ -39,6 +40,12 @@ export function createStage(canvas, tierName) {
   const composer = new EffectComposer(renderer);
   const mainPass = new RenderPass(scene, camera);
   composer.addPass(mainPass);
+
+  // "Infinite" mode: temporal feedback that recedes into a slowly spiralling vanishing point.
+  // Sits before bloom so the tunnel is bloomed once, and off by default.
+  const feedback = new FeedbackPass(1, 1);
+  feedback.enabled = false;
+  composer.addPass(feedback);
 
   // Smaller radius keeps the particle field crisp instead of smearing it into a blur; a high
   // threshold means only genuinely bright pixels bloom, so a bright cover no longer washes out.
@@ -123,9 +130,28 @@ export function createStage(canvas, tierName) {
     camera,
     composer,
     bloom,
+    feedback,
     tier,
     resize,
     pixelsPerWorldAtUnit,
+
+    /** Toggles the infinite tunnel/spiral feedback. */
+    setFeedbackEnabled(enabled) {
+      const on = !!enabled;
+      if (on && !feedback.enabled) feedback.reset();
+      feedback.enabled = on;
+    },
+
+    /** Drives the feedback rates from the audio features (per-frame delta keeps it fps-independent). */
+    updateFeedback(a, dt, scale = 1) {
+      if (!feedback.enabled) return;
+      const bass = a.pulse !== undefined ? a.pulse : a.bass;
+      const u = feedback.uniforms;
+      u.uZoom.value = 1.0 + (2.4 + bass * 2.2 + a.beat * 2.4) * dt * scale;
+      u.uRot.value = (0.3 + a.treble * 0.5 + a.beat * 0.4) * dt * scale;
+      u.uDamp.value = 0.9 + Math.min(0.03, bass * 0.03);
+      u.uChroma.value = 0.003 + a.beat * 0.022;
+    },
 
     /** Renders an extra scene (lyrics) after bloom, so bright text is not bloomed. */
     addOverlayScene(overlayScene) {
@@ -156,6 +182,10 @@ export function createStage(canvas, tierName) {
     setBloomEnabled(enabled) {
       state.bloom = !!enabled;
       bloom.enabled = !!enabled;
+    },
+    /** Film-style exposure, raised for the dark night-city scene and restored afterwards. */
+    setToneExposure(value) {
+      renderer.toneMappingExposure = value;
     },
     setPixelRatioMax(value) {
       renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, value || 1));

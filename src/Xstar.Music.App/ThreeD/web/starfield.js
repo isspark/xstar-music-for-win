@@ -106,6 +106,18 @@ export function createStarfield(scene, count) {
       points.rotation.y += dt * 0.012;
       points.rotation.x += dt * 0.004;
     },
+    /** Warp flight: streams every star toward +Z and wraps it to the far side when it passes. */
+    advance(dt, speed) {
+      const attr = geometry.attributes.position;
+      const arr = attr.array;
+      const dz = speed * dt;
+      for (let i = 2; i < arr.length; i += 3) {
+        let z = arr[i] + dz;
+        if (z > 90) z -= 180;
+        arr[i] = z;
+      }
+      attr.needsUpdate = true;
+    },
     dispose() {
       geometry.dispose();
       material.uniforms.uMap.value.dispose();

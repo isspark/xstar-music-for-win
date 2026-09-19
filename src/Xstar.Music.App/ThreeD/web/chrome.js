@@ -281,7 +281,7 @@ export function initChrome(handlers) {
       setCameraValueSilently(s.cameraMode);
       setSource(s.libraryKind);
       setQualityValue(s.quality);
-      setBloom(s.bloom !== false);
+      setBloom(s.bloom === true);
       setLyricsToggle(s.lyrics !== false);
       setLyricModeValue(s.lyricMode);
       if (typeof s.shelfSize === "number") sizeInput.value = s.shelfSize;

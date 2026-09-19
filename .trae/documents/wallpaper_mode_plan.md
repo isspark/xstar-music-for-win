@@ -287,4 +287,86 @@ SetParent(wallpaperHwnd, workerw)
   - 壁纸宿主独立实例、不受影响（壁纸本就应持续渲染）。
 - **已验证**：进入 3D 后自动点击「退出 3D」，WebView2 进程 CPU 3 秒采样由 `0.62s → 0.02s`（约 30×，渲染循环已冻结）。
 
+### 新增：形态「无限」= 隧道 + 螺旋反馈（2026-09-19）
+- 需求：一种"无限延伸且不断变化"的播放效果；先做隧道 + 螺旋融合版。
+- 实现：
+  - 新增 `web/feedback.js` 的 `FeedbackPass`（`Pass` 子类，双 `HalfFloat` ping-pong RT，`needsSwap`）：每帧把上一帧结果按 `uZoom` 放大取样（内容向心收缩=前进）、`uRot` 旋转（螺旋）、`uDamp` 衰减，`uChroma` 各通道微偏移做色散；`max(cur, echo)` 合成避免亮度累加爆白；`ring` 环形遮罩去掉边缘与被"消失点"处的堆积。
+  - 接入 `scene.js`（`mainPass → feedback → bloom → overlay → outputPass`，默认关闭），暴露 `setFeedbackEnabled()` 与 `updateFeedback(a, dt)`：`bass`→进速、`beat`→冲击、`treble`→旋转抖动；速率按 `dt` 归一化与帧率无关。
+  - 形态列表新增第 6 项「无限」(`COVER_PRESETS` + `index.html data-p="5"`)，`presetIndex===5` 时开启反馈（持久化复用既有 `coverPreset`，无需新设置项）；`reduceMotion` 下不启用。
+- 调参要点（踩坑记录）：朴素相加反馈增益 `1/(1-damp)`，`damp→0.99` 时整屏爆白 → 改用 `max` 合成；`max` 下缩放太慢（0.5/s）回声几乎重合看不出隧道 → 提到约 2.4/s 才形成清晰径向streak/螺旋。
+- **已验证**：`XSTAR_3D_CAPTURE` 截图显示粒子/星河/歌词被拉成向心螺旋 streak 的隧道效果，无爆白；`node --check` 通过；编译 0 error、测试 26/26。
+
+### 升级：形态「无限」= 镜头无限推进（2026-09-19）
+- 需求：把「无限」从纯后处理隧道升级为**镜头持续向前推进**的感觉。
+- 实现：
+  - `cover.js` 新增**无限走廊**：`setCorridor(count, spacing)` 以共享 geometry/material 复制 N 份粒子云作为 `group` 子节点（继承同一旋转/缩放/音频响应），按黄金角在飞行轴周围螺旋错开（x/y 偏移 + `rotation.z`），避免从正中心穿过；`advanceCorridor(dt, speed, wrapZ)` 每帧沿 +Z 推进，越过 `wrapZ` 即回收至队尾（跨度为 `N*spacing`），实现无缝无限。
+  - `starfield.js` 新增 `advance(dt, speed)`：所有星点沿 +Z 推进并在 `±90` 环绕回收，形成星流掠过的视差。
+  - `app.js`：`applyInfinite(on)` 统一开关（`setFeedbackEnabled` + 建/拆走廊），`presetIndex===5 && !reduceMotion` 时启用；每帧 `speed = 6 + pulse*9 + beat*16`，驱动走廊与星流；保留反馈 Pass 形成拖影 streak。
+- **已验证**：`XSTAR_3D_CAPTURE` 截图（真实歌曲「野草」播放中）显示多张封面粒子云在 3D 空间中错开后退、构成行进中的走廊，配合星流与拖影，读作镜头持续推进；`node --check` 通过；编译 0 error、测试 26/26。
+
+### 重构：形态「无限」= 无垠宇宙漫游（2026-09-19）
+- 需求：不再局限于"封面走廊"，重构成"在无垠宇宙中漫游"的视角。
+- 实现：新增 `web/cosmos.js`（按需创建 / 销毁不可见时不占位）：
+  - **星云背景**：9 个程序化云团 Sprite（叠加混合，随机缩放 120–280、`NEBULA_SPAN=460` 环绕），部分用歌曲 accent 染色；
+  - **视差星层**：远/中/近三层 `Points`（1400/900/700）沿 +Z 以不同速率（0.35/0.7/1.5）流动并环绕 → 强视差；
+  - **近景尘埃**：NormalBlending 的细颗粒层，掠过感；
+  - `advance()` 推进所有层，`update()` 随 `level` 变亮、整体缓慢自转，`setAccent()` 同步配色，`setHeight()` 跟随 DPR/视口。
+  - `app.js`：`applyInfinite` 时启用 cosmos 并把封面云**推到 z=-38** 作为"远方的歌之星"（不再做封面走廊）；帧循环 `infiniteActive` 分支改为**漫游相机**——横向/纵向正弦漂移 + `rotateZ` 侧倾 + `beat` 轻微 FOV 冲击；太阳系般的星流速度 `7 + pulse*10 + beat*18`。
+  - 反馈拖影在宇宙模式下调低到 0.45（`stage.updateFeedback(a, dt, scale)`），读作"漂流"而非硬隧道；离开该模式恢复 fov=45。
+- **已验证**：`XSTAR_3D_CAPTURE` 截图（「野草」播放中）显示紫蓝色星云背景 + 星流拖影 + 远处封面光点 + 轻微侧倾的漫游视角；`node --check` 通过；编译 0 error、测试 26/26。
+
+### 调整：宇宙模式纯黑虚空 + 隐藏封面粒子（2026-09-19）
+- 需求：宇宙漫游时前方不应再有封面；背景应为黑色。
+- 改动：
+  - `app.js` 新增 `syncCoverVisibility()`：`infiniteActive` 时 `cover.group.visible=false`（整团粒子云含"粒子歌词"一并隐藏，纯宇宙）；离开即恢复。
+  - 新增 `applyBackground()`：宇宙模式下强制背景 `#000000` 且清除背景图；离开时用缓存的 `bgColorSetting`/`bgImageSetting`（来自 `applySettings`）还原用户设置。不再把封面推到 z=-38。
+  - `cosmos.js` 星云弱化：9→6 个 Sprite、opacity `0.16~0.32 → 0.05~0.12`、尺寸 120~280→90~210、半径外推，让黑色基底占主导，仅保留少量氛围。
+- **已验证**：截图显示纯黑背景 + 彩色星流拖影，无任何封面/粒子云；`node --check` 通过；编译 0 error、测试 26/26。
+
+### 重构：形态「赛博」= 赛博朋克夜城（2026-09-19）
+- 需求：宇宙漫游效果不好看，改为夜晚赛博朋克城市：霓虹随节拍脉动、全息均衡器条从地面升起、重低音冲击波、飞车光轨、湿街反射、电影级光照、动态镜头。
+- 实现：删除 `cosmos.js`，新增 `web/cybercity.js`（全程序化，无外部资源）：
+  - **楼群**：120 栋塔楼（共享 `BoxGeometry` + 自定义 `ShaderMaterial`），窗口按**世界坐标**网格排布（缩放无关），随机亮灭/闪烁；per-tower 环境微光 + `uNeon`(歌曲 accent) 染色 + `uPulse` 随音量；自带指数雾（`uFog` 紫、`uFogDensity`）。
+  - **霓虹**：34 块加法混合招牌（程序化 canvas 图）+ 80 个霓虹光点 Sprite + 高楼顶灯；各自相位脉动并受 `beat` 冲击。
+  - **湿街反射**：深色沥青网格地面 + 招牌下方的**地面拖影**贴片（加法混合、随招牌脉动）+ 大范围地面光晕 `spill`。
+  - **全息均衡器**：48 根加法条从地面（`GROUND_Y`）升起，高度由 `spectrum` 分频驱动、发光基线。
+  - **重低音冲击波**：5 个环形地面波池，`beat>0.55` 触发扩散淡出。
+  - **飞车光轨**：6 辆小车（车体 + 长条拖影）横穿天空并随城市回收。
+  - **雨**：1400 点竖条贴图下落循环，跟随镜头。
+  - **地平线辉光**：远景竖直渐变面（紫→品红）营造天际线氛围。
+  - `app.js`：`applyInfinite` 启用城市、隐藏封面云、背景强制黑、**关闭反馈拖影**、曝光提到 1.75（离开恢复 1.3）；帧循环改为**电影感运镜**——沿街推进 `10 + pulse*11 + beat*18`、横摆/起伏/微侧倾、`beat` FOV 冲击；`setAccent` 同步城市霓虹。形态标签 `无限 → 赛博`。
+  - `scene.js` 新增 `setToneExposure()`。
+- **已验证**：`XSTAR_3D_CAPTURE` 截图（「不讲道理」播放中）显示紫粉天际线辉光、发光窗格楼群、霓虹光点、地面网格与光晕、全息均衡器条；`node --check` 通过；编译 0 error、测试 26/26。
+- 遗留：`feedback.js` 与 `cover.js` 走廊代码暂时保留但已不启用（后续可能复用）。
+
+### 新增：形态「虫洞」= 第一人称超空间跳跃（2026-09-19）
+- 需求：第一人称穿越宇宙虫洞、超空间跳跃、星光条纹变彩色丝带、穿过多色星云（紫→青→金）、远处抽象几何形变、电影级光照、高速、运动模糊、沉浸。
+- 实现：新增 `web/wormhole.js`（程序化）：
+  - **虫洞通道**：`CylinderGeometry(6,6,560,80,1,true)` 内壁 + 自定义 Shader（`BackSide` + 加法混合）：纵向 **ribs**（`fract(v*70 - uScroll)` 形成向镜头滚动的环脊）+ 沿轴 **ribbons**（`pow(|sin(u*84π)|,14)` 长条丝带）+ twist 调制；`uScroll` 由实际里程累加，速度变化真实。
+  - **调色**：HSL 色相环插值（紫 0.76 → 蓝 → 青 0.5 → 品红 → 金 0.12 → 紫），避免 RGB 直插穿绿；Shader 与 JS 各一份 `palette()` 保持一致。
+  - **星云**：10 个加法 Sprite 沿通道内侧漂移回收、颜色按色相环循环、闪烁。
+  - **抽象几何**：5 个线框体（Icosahedron/TorusKnot/Octahedron）顶点位移形变（`sin/cos` 噪声）+ 自旋 + 颜色循环 + 随脉冲放大，沿 Z 高速掠过回收。
+  - **通道尽头核心光** + 随节拍脉动。
+  - **运动模糊/光带**：`stage.setFeedbackEnabled(true)` 复用反馈 Pass。
+- `app.js`：重构为 `applyPresetMode()` 统一管理两个替换场景 `赛博(CYBER_PRESET=5)` / `虫洞(WORMHOLE_PRESET=6)`：`cyberActive`/`wormholeActive`；背景模式强制黑；曝光 虫洞 1.65 / 赛博 1.75；虫洞隐藏星空（`stars.points.visible=false`）与封面云。
+- 相机：第一人称、`fov 72 + beat*8`、高速 `45 + pulse*60 + beat*95`、横摆+滚转+微摆动。
+- **已验证**：截图显示紫色通道 + 彩色丝带放射 + 中心变形的线框几何；`node --check` 通过；编译 0 error、测试 26/26。形态列表新增「虫洞」（index 6）。
+
+### 新增：形态「极简」= 极简 3D 粒子波场（2026-09-19）
+- 需求：白/蓝粒子在虚空中漂浮、随声波形成波浪图案、干净背景、柔和光晕、优雅运动、抽象艺术、舒缓但动态。
+- 实现：新增 `web/minimal.js`（程序化）：
+  - **波场**：`gridSize²` 网格 `Points`（balanced≈96²，随质量档 64~180），顶点着色器用 4 组正弦/径向波叠加生成 y 位移——低频 `pulse` 抬升大涌浪、`mid` 中波、`treble` 细纹、径向扩散波；波峰冷白、波谷深蓝（`mix`）。
+  - **柔和光晕**：片元用柔和圆盘 `smoothstep` 双层（核心+光晕）× 加法混合 + bloom。
+  - **星空**：1100 个白/蓝漂移星点（顶点内正弦漂移）。
+  - **优雅运动**：整体缓慢自转 `0.02 rad/s`；镜头低速环绕（半径 58、y≈24、fov 32）俯视。
+- `app.js`：新增 `MINIMAL_PRESET=7` 与 `minimalActive`，并入 `applyPresetMode()`：强制黑背景、隐藏封面云与基础星空、曝光 1.3；`applyViewport` 同步 `setHeight`。
+- **已验证**：截图显示黑底虚空中漂浮的白/蓝粒子波场（波峰波谷分层）+ 稀疏星点；`node --check` 通过；编译 0 error、测试 26/26。形态列表新增「极简」（index 7）。
+
+### 极简：支持视角与粒子设置（2026-09-19）
+- 需求：与「律动」一致，极简模式可调视角与粒子参数。
+- 改动：
+  - **视角**：`app.js` 极简分支改用共享 `orbit`（拖拽旋转 / 滚轮缩放），叠加轻微自动漂移；滚轮缩放范围按模式区分（极简 `22~140`，其余 `4.5~12`）；首次进入极简设默认视角（`theta 0 / phi 0.46 / radius 82`）。
+  - **粒子设置**：`minimal.js` 新增 `uSizeMul` / `uColorMode` / `uMonoColor` / `uAccent` 与 `setSizeMultiplier` / `setGridMultiplier`（重建网格 48~240）/ `setColorMode`（单色 / 白蓝自然 / 彩色色相）/ `setMonoColor`；`app.js` 的 `onParticleSize/onParticleCount/onColorMode/onParticleColor` 与 `applySettings` 同步作用到极简场与星空层；光晕沿用全局 bloom `glowMultiplier`。
+- **已验证**：`node --check` 通过；编译 0 error、测试 26/26。
+
 - **W4 待开始**：锁屏 / 全屏应用暂停、多显示器评估、可选开机自启（`--wallpaper` + 启动项）、纯逻辑单测、`installer.iss` 核对。

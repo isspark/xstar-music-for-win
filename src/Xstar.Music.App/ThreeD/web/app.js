@@ -5,6 +5,9 @@ import { onMessage, action } from "./bridge.js";
 import { audio, feedAudio, updateAudio } from "./audio.js";
 import { createStage, QUALITY } from "./scene.js";
 import { createStarfield } from "./starfield.js";
+import { createCyberCity } from "./cybercity.js";
+import { createWormhole } from "./wormhole.js";
+import { createMinimalField } from "./minimal.js";
 import { createCover, COVER_PRESETS } from "./cover.js";
 import { createShelf } from "./shelf.js";
 import { createLyrics } from "./lyrics.js";
@@ -34,6 +37,11 @@ const stage = createStage(canvas, "balanced");
 const stars = createStarfield(stage.scene, stage.tier.stars);
 
 let presetIndex = 0;
+// The last two presets are full replacement scenes rather than particle shapes.
+const CYBER_PRESET = 5;
+const WORMHOLE_PRESET = 6;
+const MINIMAL_PRESET = 7;
+const CORRIDOR_SPACING = 12;
 const cover = createCover(stage.scene, stage.tier.grid, "#22c55e");
 cover.setPreset(presetIndex);
 
@@ -73,7 +81,7 @@ if (WALLPAPER) {
   });
   // Rendered after bloom so the card titles keep their edge instead of blowing out white.
   stage.addOverlayScene(shelfScene);
-  shelf.setPresence("always"); // 默认常驻，便于发现；控制栏可切换为自动隐藏
+  shelf.setPresence("auto"); // 默认自动隐藏，控制栏可切换为常驻显示
 }
 
 /* ---------------- camera orbit (drag to rotate, wheel to zoom) ---------------- */
@@ -123,7 +131,11 @@ canvas.addEventListener(
   "wheel",
   (event) => {
     if (event.defaultPrevented) return; // shelf / detail took the wheel
-    orbit.radiusTarget = Math.max(4.5, Math.min(12, orbit.radiusTarget + event.deltaY * 0.0025));
+    // The minimal field lives far outside the cover cloud, so it zooms over a wider range.
+    const min = minimalActive ? 22 : 4.5;
+    const max = minimalActive ? 140 : 12;
+    const step = minimalActive ? 0.02 : 0.0025;
+    orbit.radiusTarget = Math.max(min, Math.min(max, orbit.radiusTarget + event.deltaY * step));
   },
   { passive: true }
 );
@@ -133,11 +145,14 @@ const lyricsStage = createLyrics(lyricsScene);
 stage.addOverlayScene(lyricsScene);
 
 let active = true; // host-gated render loop; a hidden 3D view must not keep drawing
+let bgColorSetting = "#05060a"; // last configured 3D background, restored when leaving the night city
+let bgImageSetting = null;
+let accentHexCurrent = "#22c55e"; // last accent, applied to the city when it is created lazily
 let lyricsEnabled = true;
 let lyricMode = "default"; // "default" = 3D text stage; "particle" = current line shapes the cloud
 let lyricLines = [];
 let lyricIndex = 0;
-let bloomEnabled = true;
+let bloomEnabled = false;
 let glowMultiplier = 1;
 let particleColorOverride = "";
 let reduceMotion = false;
@@ -151,11 +166,18 @@ function currentLyricLine() {
   return text === "♪" ? "" : text;
 }
 
+/* The city / wormhole are the whole scene: the cover cloud (album art or particle lyrics) is hidden. */
+function syncCoverVisibility() {
+  cover.group.visible = !(cyberActive || wormholeActive || minimalActive);
+  cover.group.position.z = 0;
+}
+
 /* Reconciles the two lyric renderers: the 3D text stage (default) and the particle mask (粒子). */
 function syncLyricsUi() {
   const hasLyrics = lyricLines.length > 0;
   lyricsStage.setVisible(lyricsEnabled && lyricMode === "default");
   cover.setLyricText(lyricsEnabled && lyricMode === "particle" ? currentLyricLine() : null);
+  syncCoverVisibility();
   const on = lyricsEnabled && hasLyrics;
   chrome.setLyricsActive(on);
   chrome.setNowPlayingVisible(!on);
@@ -166,6 +188,7 @@ const chrome = initChrome({
     presetIndex = Math.max(0, Math.min(COVER_PRESETS.length - 1, index | 0));
     cover.setPreset(presetIndex);
     chrome.setPreset(presetIndex);
+    applyPresetMode();
     action("setSetting", { key: "coverPreset", value: presetIndex });
   },
   onLyricsToggle() {
@@ -214,19 +237,23 @@ const chrome = initChrome({
   },
   onParticleSize(value) {
     cover.setSizeMultiplier(value);
+    if (minimal) minimal.setSizeMultiplier(value);
   },
   onGlow(value) {
     glowMultiplier = value;
   },
   onParticleCount(value) {
     cover.setGridMultiplier(value);
+    if (minimal) minimal.setGridMultiplier(value);
   },
   onColorMode(value) {
     cover.setColorMode(value);
+    if (minimal) minimal.setColorMode(value);
   },
   onParticleColor(value) {
     particleColorOverride = value || "";
     cover.setMonoColor(particleColorOverride);
+    if (minimal) minimal.setMonoColor(particleColorOverride);
   },
 });
 
@@ -237,11 +264,87 @@ function applyRenderQuality() {
   baseBloom = tier.bloomStrength;
 }
 
+/* Two presets are full replacement scenes: the neon night city ("赛博") and the hyperspace
+   wormhole ("虫洞"). The cover cloud is hidden while either is active. */
+let cyberActive = false;
+let wormholeActive = false;
+let minimalActive = false;
+let city = null;
+let wormhole = null;
+let minimal = null;
+
+function ensureCity() {
+  if (!city) {
+    city = createCyberCity(stage.scene);
+    city.setAccent(accentHexCurrent);
+  }
+  return city;
+}
+function ensureWormhole() {
+  if (!wormhole) {
+    wormhole = createWormhole(stage.scene);
+    wormhole.setAccent(accentHexCurrent);
+  }
+  return wormhole;
+}
+function ensureMinimal() {
+  if (!minimal) {
+    minimal = createMinimalField(stage.scene, stage.tier, accentHexCurrent);
+    minimal.setHeight(stage.pixelsPerWorldAtUnit());
+  }
+  return minimal;
+}
+
+/* Both replacement scenes want a pure black backdrop; their own glow carries the frame. */
+function applyBackground() {
+  if (cyberActive || wormholeActive || minimalActive) {
+    stage.setBackgroundColor("#000000");
+    stage.clearBackgroundImage();
+    return;
+  }
+  stage.setBackgroundColor(bgColorSetting);
+  if (bgImageSetting) stage.setBackgroundImage(bgImageSetting);
+  else stage.clearBackgroundImage();
+}
+
+function applyPresetMode() {
+  const cyber = presetIndex === CYBER_PRESET && !reduceMotion;
+  const worm = presetIndex === WORMHOLE_PRESET && !reduceMotion;
+  const minimalMode = presetIndex === MINIMAL_PRESET && !reduceMotion;
+
+  if (cyber) ensureCity().setVisible(true);
+  else if (city) city.setVisible(false);
+  if (worm) ensureWormhole().setVisible(true);
+  else if (wormhole) wormhole.setVisible(false);
+  if (minimalMode) ensureMinimal().setVisible(true);
+  else if (minimal) minimal.setVisible(false);
+
+  // Give the minimal field a sensible default view the first time it is entered (still adjustable).
+  if (minimalMode && !minimalActive) {
+    orbit.targetTheta = orbit.theta = 0;
+    orbit.targetPhi = orbit.phi = 0.46;
+    orbit.radiusTarget = orbit.radius = 82;
+  }
+
+  cyberActive = cyber;
+  wormholeActive = worm;
+  minimalActive = minimalMode;
+
+  stage.setFeedbackEnabled(worm); // the jump relies on the streak/afterimage pass for motion blur
+  stage.setToneExposure(worm ? 1.65 : cyber ? 1.75 : 1.3);
+
+  // The wormhole and the minimal field bring their own star content.
+  stars.points.visible = !worm && !minimalMode;
+  cover.setCorridor(0, CORRIDOR_SPACING);
+  applyBackground();
+  syncCoverVisibility();
+}
+
 function applySettings(settings) {
   if (!settings) return;
 
   currentQuality = settings.quality || "balanced";
-  bloomEnabled = settings.bloom !== false;
+  bloomEnabled = settings.bloom === true;
   glowMultiplier = typeof settings.glow === "number" ? settings.glow : 1;
   reduceMotion = !!settings.reduceMotion;
   applyRenderQuality();
@@ -253,12 +356,22 @@ function applySettings(settings) {
   presetIndex = Math.max(0, Math.min(COVER_PRESETS.length - 1, settings.coverPreset | 0));
   cover.setPreset(presetIndex);
   chrome.setPreset(presetIndex);
+  applyPresetMode();
 
-  cover.setSizeMultiplier(typeof settings.particleSize === "number" ? settings.particleSize : 1);
-  cover.setGridMultiplier(typeof settings.particleCount === "number" ? settings.particleCount : 1);
-  cover.setColorMode(typeof settings.particleColorMode === "number" ? settings.particleColorMode : 1);
+  const particleSize = typeof settings.particleSize === "number" ? settings.particleSize : 1;
+  const particleCount = typeof settings.particleCount === "number" ? settings.particleCount : 1;
+  const colorMode = typeof settings.particleColorMode === "number" ? settings.particleColorMode : 1;
+  cover.setSizeMultiplier(particleSize);
+  cover.setGridMultiplier(particleCount);
+  cover.setColorMode(colorMode);
   particleColorOverride = settings.particleColor || "";
   if (particleColorOverride) cover.setMonoColor(particleColorOverride);
+  if (minimal) {
+    minimal.setSizeMultiplier(particleSize);
+    minimal.setGridMultiplier(particleCount);
+    minimal.setColorMode(colorMode);
+    if (particleColorOverride) minimal.setMonoColor(particleColorOverride);
+  }
 
   shelf.setLayout({
     size: settings.shelfSize || 1,
@@ -268,9 +381,9 @@ function applySettings(settings) {
     opacity: settings.shelfOpacity || 1,
   });
 
-  stage.setBackgroundColor(settings.backgroundColor || "#05060a");
-  if (settings.backgroundImage) stage.setBackgroundImage(settings.backgroundImage);
-  else stage.clearBackgroundImage();
+  bgColorSetting = settings.backgroundColor || "#05060a";
+  bgImageSetting = settings.backgroundImage || null;
+  applyBackground();
 
   chrome.applySettings(settings);
 
@@ -279,6 +392,7 @@ function applySettings(settings) {
 
 chrome.setPreset(presetIndex);
 chrome.setQuality(currentQuality);
+applyPresetMode();
 syncLyricsUi();
 
 const accent = new THREE.Color("#22c55e");
@@ -289,6 +403,7 @@ function applyViewport() {
   const pixelsPerWorld = stage.pixelsPerWorldAtUnit();
   cover.setPixelsPerWorld(pixelsPerWorld);
   stars.setHeight(pixelsPerWorld);
+  if (minimal) minimal.setHeight(pixelsPerWorld);
   shelf.setViewport(width, height);
 }
 
@@ -300,6 +415,10 @@ function setAccent(hex) {
   cover.setAccent(hex);
   lyricsStage.setAccent(hex);
   chrome.setAccent(hex);
+  accentHexCurrent = hex || accentHexCurrent;
+  if (city) city.setAccent(accentHexCurrent);
+  if (wormhole) wormhole.setAccent(accentHexCurrent);
+  if (minimal) minimal.setAccent(accentHexCurrent);
   if (!particleColorOverride) {
     cover.setMonoColor(hex);
     chrome.setParticleColorValue(hex);
@@ -361,6 +480,7 @@ onMessage((message) => {
 window.addEventListener("resize", applyViewport);
 applyViewport();
 
+let travel = 0;
 let last = performance.now();
 let lastRender = 0;
 let frames = 0;
@@ -379,25 +499,85 @@ function frame(now) {
   const time = now / 1000;
 
   updateAudio(dt);
-  cover.update(dt, audio, time);
-  stars.update(dt, audio);
+  stage.updateFeedback(audio, dt);
 
   const cam = stage.camera;
 
-  orbit.theta += (orbit.targetTheta - orbit.theta) * Math.min(1, dt * 10);
-  orbit.phi += (orbit.targetPhi - orbit.phi) * Math.min(1, dt * 10);
-  orbit.radius += (orbit.radiusTarget - orbit.radius) * Math.min(1, dt * 6);
+  if (cyberActive) {
+    // Night-city flythrough: the street streams past while the camera drifts and banks, so it
+    // reads as a cinematic chase rather than a static shot.
+    const speed = 10 + audio.pulse * 11 + audio.beat * 18;
+    travel += speed * dt;
+    ensureCity().advance(dt, speed);
+    city.update(dt, audio);
 
-  const theta = orbit.theta + Math.sin(time * 0.15) * 0.05;
-  const phi = orbit.phi + Math.cos(time * 0.12) * 0.03;
-  const radius = orbit.radius - audio.pulse * 1.1 - audio.beat * 0.25;
-  const cosPhi = Math.cos(phi);
-  cam.position.set(
-    radius * cosPhi * Math.sin(theta),
-    radius * Math.sin(phi),
-    radius * cosPhi * Math.cos(theta)
-  );
-  cam.lookAt(0, 0, 0);
+    const sway = Math.sin(travel * 0.06) * 1.0 + Math.sin(travel * 0.021) * 0.5;
+    cam.position.set(
+      sway,
+      city.groundY + 1.75 + Math.sin(travel * 0.03) * 0.15,
+      10 + Math.sin(travel * 0.013) * 0.8
+    );
+    cam.lookAt(sway * 0.35, city.groundY + 2.6, -26);
+    cam.rotateZ(Math.sin(travel * 0.025) * 0.05);
+    city.alignEq(cam.position);
+    cam.fov = 54 - audio.beat * 3;
+    cam.updateProjectionMatrix();
+  } else if (wormholeActive) {
+    // Hyperspace jump: first-person, very fast, wide lens and heavy banking.
+    const speed = 45 + audio.pulse * 60 + audio.beat * 95;
+    travel += speed * dt;
+    ensureWormhole().update(dt, audio, speed);
+
+    const swayX = Math.sin(travel * 0.03) * 1.3;
+    const swayY = Math.cos(travel * 0.023) * 1.0;
+    cam.position.set(swayX, swayY, 0);
+    cam.lookAt(swayX * 0.2, swayY * 0.2, -90);
+    cam.rotateZ(Math.sin(travel * 0.02) * 0.25 + Math.sin(travel * 0.008) * 0.15);
+    cam.fov = 72 + audio.beat * 8;
+    cam.updateProjectionMatrix();
+  } else if (minimalActive) {
+    // Calm drift, but the view is fully user-controllable (drag to orbit, wheel to zoom).
+    ensureMinimal().update(dt, audio);
+    orbit.theta += (orbit.targetTheta - orbit.theta) * Math.min(1, dt * 10);
+    orbit.phi += (orbit.targetPhi - orbit.phi) * Math.min(1, dt * 8);
+    orbit.radius += (orbit.radiusTarget - orbit.radius) * Math.min(1, dt * 6);
+
+    const theta = orbit.theta + Math.sin(time * 0.06) * 0.05;
+    const phi = orbit.phi + Math.cos(time * 0.045) * 0.03;
+    const radius = orbit.radius - audio.pulse * 1.5;
+    const cosPhi = Math.cos(phi);
+    cam.position.set(
+      radius * cosPhi * Math.sin(theta),
+      radius * Math.sin(phi),
+      radius * cosPhi * Math.cos(theta)
+    );
+    cam.lookAt(0, Math.sin(time * 0.04) * 1.0, 0);
+    cam.rotateZ(Math.sin(time * 0.03) * 0.02);
+    cam.fov = 32;
+    cam.updateProjectionMatrix();
+  } else {
+    if (cam.fov !== 45) {
+      cam.fov = 45;
+      cam.updateProjectionMatrix();
+    }
+    orbit.theta += (orbit.targetTheta - orbit.theta) * Math.min(1, dt * 10);
+    orbit.phi += (orbit.targetPhi - orbit.phi) * Math.min(1, dt * 10);
+    orbit.radius += (orbit.radiusTarget - orbit.radius) * Math.min(1, dt * 6);
+
+    const theta = orbit.theta + Math.sin(time * 0.15) * 0.05;
+    const phi = orbit.phi + Math.cos(time * 0.12) * 0.03;
+    const radius = orbit.radius - audio.pulse * 1.1 - audio.beat * 0.25;
+    const cosPhi = Math.cos(phi);
+    cam.position.set(
+      radius * cosPhi * Math.sin(theta),
+      radius * Math.sin(phi),
+      radius * cosPhi * Math.cos(theta)
+    );
+    cam.lookAt(0, 0, 0);
+  }
+
+  cover.update(dt, audio, time);
+  stars.update(dt, audio);
 
   shelf.update(dt, time);
   lyricsStage.update(dt, audio, time);

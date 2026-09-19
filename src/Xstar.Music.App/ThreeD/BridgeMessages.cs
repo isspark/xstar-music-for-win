@@ -114,11 +114,11 @@ public sealed class ThreeDSettingsMessage
     public string Type => "settings";
     public string Quality { get; init; } = "balanced";
     public string ShelfMode { get; init; } = "side";
-    public string ShelfPresence { get; init; } = "always";
+    public string ShelfPresence { get; init; } = "auto";
     public string CameraMode { get; init; } = "dynamic";
     public string LibraryKind { get; init; } = "albums";
     public int CoverPreset { get; init; }
-    public bool Bloom { get; init; } = true;
+    public bool Bloom { get; init; } = false;
     public bool Lyrics { get; init; } = true;
     /// <summary>Lyric rendering: "default" (3D text stage) or "particle" (current line shapes the cloud).</summary>
     public string LyricMode { get; init; } = "default";

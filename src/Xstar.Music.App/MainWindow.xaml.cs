@@ -121,10 +121,10 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
     private string _threeDLibraryKind = "albums";
     private string _threeDQuality = "balanced";
     private string _threeDShelfMode = "side";
-    private string _threeDShelfPresence = "always";
+    private string _threeDShelfPresence = "auto";
     private string _threeDCameraMode = "dynamic";
     private int _threeDCoverPreset;
-    private bool _threeDBloom = true;
+    private bool _threeDBloom = false;
     private bool _threeDLyrics = true;
     private string _threeDLyricMode = "default";
     private double _threeDShelfSize = 1.0;
@@ -700,11 +700,11 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
                 _vizLyrics = state?.VisualizerLyrics ?? false;
                 _threeDQuality = state?.ThreeDQuality ?? "balanced";
                 _threeDShelfMode = state?.ThreeDShelfMode ?? "side";
-                _threeDShelfPresence = state?.ThreeDShelfPresence ?? "always";
+                _threeDShelfPresence = state?.ThreeDShelfPresence ?? "auto";
                 _threeDCameraMode = state?.ThreeDCameraMode ?? "dynamic";
                 _threeDLibraryKind = state?.ThreeDLibraryKind ?? "albums";
                 _threeDCoverPreset = state?.ThreeDCoverPreset ?? 0;
-                _threeDBloom = state?.ThreeDBloom ?? true;
+                _threeDBloom = state?.ThreeDBloom ?? false;
                 _threeDLyrics = state?.ThreeDLyrics ?? true;
                 _threeDLyricMode = state?.ThreeDLyricMode ?? "default";
                 _threeDShelfSize = state?.ThreeDShelfSize is > 0.2 and < 3 ? state.ThreeDShelfSize : 1.0;
@@ -1967,11 +1967,11 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
     {
         _threeDQuality = "balanced";
         _threeDShelfMode = "side";
-        _threeDShelfPresence = "always";
+        _threeDShelfPresence = "auto";
         _threeDCameraMode = "dynamic";
         _threeDLibraryKind = "albums";
         _threeDCoverPreset = 0;
-        _threeDBloom = true;
+        _threeDBloom = false;
         _threeDLyrics = true;
         _threeDLyricMode = "default";
         _threeDShelfSize = 1.0;
@@ -4167,11 +4167,11 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
         public bool VisualizerLyrics { get; set; }
         public string ThreeDQuality { get; set; } = "balanced";
         public string ThreeDShelfMode { get; set; } = "side";
-        public string ThreeDShelfPresence { get; set; } = "always";
+        public string ThreeDShelfPresence { get; set; } = "auto";
         public string ThreeDCameraMode { get; set; } = "dynamic";
         public string ThreeDLibraryKind { get; set; } = "albums";
         public int ThreeDCoverPreset { get; set; }
-        public bool ThreeDBloom { get; set; } = true;
+        public bool ThreeDBloom { get; set; } = false;
         public bool ThreeDLyrics { get; set; } = true;
         public string ThreeDLyricMode { get; set; } = "default";
         public double ThreeDShelfSize { get; set; } = 1.0;
