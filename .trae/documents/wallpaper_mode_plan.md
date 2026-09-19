@@ -278,4 +278,13 @@ SetParent(wallpaperHwnd, workerw)
   - `app.js`：跟踪 `lyricLines` / `lyricIndex` / `lyricMode`；`syncLyricsUi()` 统一决策——默认模式显示 3D 歌词文字、粒子模式把当前行交给 `cover.setLyricText`，两者按「有歌词且开启」决定歌词按钮态与 now-playing 显隐。
 - **已验证**：注入 `settings{lyricMode:"particle"}` + 歌词（index=1）+ 无封面 `artwork` 后截图，粒子云构成当前行「夜空中最亮的星」且 3D 歌词文字层隐藏（临时注入已移除）；`node --check` 通过；编译 0 error、测试 26/26。
 
+### 修复：退出 3D 后 GPU 仍高（2026-09-19）
+- 现象：退出 3D 模式后 GPU 占用居高不下。
+- 根因：退出时只调用了 `_threeDHost.Stop()`（停掉 C# 推送计时器），**WebView2 页面内的 `requestAnimationFrame` 循环仍在跑**；`ThreeDView` 只是 `Visibility.Collapsed`，Chromium 仍持续渲染 → GPU 不降。
+- 修复：
+  - `web/app.js` 新增宿主门控 `active`：`frame()` 首行 `if (!active) return;`（不再排下一帧）；`setActive()` 恢复时重置计时基准避免大 `dt`；处理 `{type:"active",active}` 消息。
+  - `ThreeDHost` 新增 `PushActive(bool)`；`Stop()` 先 `PushActive(false)` 再停计时器；`StartAsync()` 末尾 `PushActive(true)`；`ready` 握手按 `IsRunning` 回推状态（覆盖“先停后加载”的竞态）。
+  - 壁纸宿主独立实例、不受影响（壁纸本就应持续渲染）。
+- **已验证**：进入 3D 后自动点击「退出 3D」，WebView2 进程 CPU 3 秒采样由 `0.62s → 0.02s`（约 30×，渲染循环已冻结）。
+
 - **W4 待开始**：锁屏 / 全屏应用暂停、多显示器评估、可选开机自启（`--wallpaper` + 启动项）、纯逻辑单测、`installer.iss` 核对。

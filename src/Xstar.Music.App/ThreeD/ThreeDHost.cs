@@ -109,6 +109,7 @@ public sealed class ThreeDHost : IDisposable
         PushLyricIndex();
         PushSettings();
         PushState();
+        PushActive(true);
 #if DEBUG
         // Headless verification aid: XSTAR_3D_CAPTURE=<path> dumps the web view after startup.
         var capturePath = Environment.GetEnvironmentVariable("XSTAR_3D_CAPTURE");
@@ -124,7 +125,24 @@ public sealed class ThreeDHost : IDisposable
         return true;
     }
 
-    public void Stop() => _timer.Stop();
+    public void Stop()
+    {
+        // A collapsed WebView2 keeps running its requestAnimationFrame loop, so tell the page to
+        // freeze — otherwise the GPU stays busy after leaving 3D mode.
+        PushActive(false);
+        _timer.Stop();
+    }
+
+    /// <summary>Pauses / resumes the page's render loop.</summary>
+    public void PushActive(bool active)
+    {
+        if (_core is null) return;
+        try
+        {
+            _core.PostWebMessageAsJson(active ? "{\"type\":\"active\",\"active\":true}" : "{\"type\":\"active\",\"active\":false}");
+        }
+        catch { /* view torn down */ }
+    }
 
     /// <summary>Injects a camera orbit / zoom delta (empty-desktop drag in wallpaper mode).</summary>
     public void PushOrbit(int dx, int dy, int wheel)
@@ -273,6 +291,7 @@ public sealed class ThreeDHost : IDisposable
                 PushLyricIndex();
                 PushSettings();
                 PushState();
+                PushActive(IsRunning);
                 break;
             case "getState": PushState(); break;
             case "getLibrary": PushLibrary(message.Kind ?? "albums"); break;

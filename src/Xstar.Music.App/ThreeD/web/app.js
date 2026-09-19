@@ -132,6 +132,7 @@ const lyricsScene = new THREE.Scene();
 const lyricsStage = createLyrics(lyricsScene);
 stage.addOverlayScene(lyricsScene);
 
+let active = true; // host-gated render loop; a hidden 3D view must not keep drawing
 let lyricsEnabled = true;
 let lyricMode = "default"; // "default" = 3D text stage; "particle" = current line shapes the cloud
 let lyricLines = [];
@@ -318,6 +319,9 @@ onMessage((message) => {
     case "settings":
       applySettings(message);
       break;
+    case "active":
+      setActive(message.active !== false);
+      break;
     case "artwork":
       if (message.key) shelf.setArtwork(message.key, message.data);
       else if (message.data) cover.setImage(message.data);
@@ -363,6 +367,7 @@ let frames = 0;
 let fpsClock = last;
 
 function frame(now) {
+  if (!active) return;
   if (reduceMotion && now - lastRender < 33) {
     requestAnimationFrame(frame);
     return;
@@ -408,6 +413,18 @@ function frame(now) {
   }
 
   requestAnimationFrame(frame);
+}
+
+/* The host pauses the loop when the 3D view is hidden (otherwise a collapsed WebView2 keeps
+   rendering on the GPU). Resume resets the clock so the first frame after the pause stays smooth. */
+function setActive(next) {
+  const on = next !== false;
+  if (on === active) return;
+  active = on;
+  if (on) {
+    last = performance.now();
+    requestAnimationFrame(frame);
+  }
 }
 
 requestAnimationFrame(frame);
