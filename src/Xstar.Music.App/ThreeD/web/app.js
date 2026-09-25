@@ -42,6 +42,15 @@ const CYBER_PRESET = 5;
 const WORMHOLE_PRESET = 6;
 const MINIMAL_PRESET = 7;
 const CORRIDOR_SPACING = 12;
+// How far to slide the cover cloud left (world units) when the shelf is fully shown, so the
+// shelf lane on the right never overlaps the cover art.
+const COVER_SHELF_SHIFT = 1.4;
+// How far to lift the cover (world units) when the stage-mode shelf row is shown along the bottom.
+const COVER_SHELF_LIFT = 1.7;
+// Current shelf horizontal offset (world units); the cover shift compensates so the gap is stable.
+let shelfOffsetX = 0;
+// Shelf layout mode: "side" (cards on the right) or "stage" (cards along the bottom).
+let shelfMode = "side";
 const cover = createCover(stage.scene, stage.tier.grid, "#22c55e");
 cover.setPreset(presetIndex);
 
@@ -209,6 +218,7 @@ const chrome = initChrome({
     shelf.setPresence(value);
   },
   onShelfMode(value) {
+    shelfMode = value === "stage" ? "stage" : "side";
     shelf.setMode(value);
   },
   onCamera(value) {
@@ -223,6 +233,7 @@ const chrome = initChrome({
     applyRenderQuality();
   },
   onShelfLayout(layout) {
+    if (layout && typeof layout.offsetX === "number") shelfOffsetX = layout.offsetX;
     shelf.setLayout(layout);
   },
   onBackgroundColor(hex) {
@@ -254,6 +265,13 @@ const chrome = initChrome({
     particleColorOverride = value || "";
     cover.setMonoColor(particleColorOverride);
     if (minimal) minimal.setMonoColor(particleColorOverride);
+  },
+  onCoverParticles(on) {
+    cover.setPreferCover(on);
+  },
+  // All settings-panel controls funnel here so their changes reach the host (and get persisted).
+  onSetting(key, value) {
+    action("setSetting", { key, value });
   },
 });
 
@@ -364,6 +382,7 @@ function applySettings(settings) {
   cover.setSizeMultiplier(particleSize);
   cover.setGridMultiplier(particleCount);
   cover.setColorMode(colorMode);
+  cover.setPreferCover(settings.coverParticles === true);
   particleColorOverride = settings.particleColor || "";
   if (particleColorOverride) cover.setMonoColor(particleColorOverride);
   if (minimal) {
@@ -373,6 +392,7 @@ function applySettings(settings) {
     if (particleColorOverride) minimal.setMonoColor(particleColorOverride);
   }
 
+  shelfOffsetX = settings.shelfOffsetX || 0;
   shelf.setLayout({
     size: settings.shelfSize || 1,
     offsetX: settings.shelfOffsetX || 0,
@@ -580,6 +600,15 @@ function frame(now) {
   stars.update(dt, audio);
 
   shelf.update(dt, time);
+  // Keep the shelf lane clear of the cover art: slide the cover left (side) or lift it (stage).
+  const shelfVis = shelf.visibility || 0;
+  if (shelfMode === "stage") {
+    cover.group.position.x = 0;
+    cover.group.position.y = COVER_SHELF_LIFT * shelfVis;
+  } else {
+    cover.group.position.x = -Math.max(0, COVER_SHELF_SHIFT - shelfOffsetX) * shelfVis;
+    cover.group.position.y = 0;
+  }
   lyricsStage.update(dt, audio, time);
 
   stage.bloom.strength = baseBloom * glowMultiplier + audio.beat * 0.6 + Math.max(0, audio.pulse - 0.6) * 0.3;

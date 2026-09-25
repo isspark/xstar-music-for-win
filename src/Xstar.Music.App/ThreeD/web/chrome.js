@@ -33,6 +33,7 @@ export function initChrome(handlers) {
   const presetButtons = Array.from(document.querySelectorAll("#set-preset button"));
   const qualityButtons = Array.from(document.querySelectorAll("#set-quality button"));
   const bloomBtn = document.getElementById("set-bloom");
+  const coverParticlesBtn = document.getElementById("set-coverparticles");
   const lyricsToggle = document.getElementById("set-lyrics");
   const lyricModeButtons = Array.from(document.querySelectorAll("#set-lyricmode button"));
   const sizeInput = document.getElementById("set-size");
@@ -161,6 +162,13 @@ export function initChrome(handlers) {
     persist("bloom", next);
   });
 
+  coverParticlesBtn.addEventListener("click", () => {
+    const next = !coverParticlesBtn.classList.contains("active");
+    setCoverParticles(next);
+    if (handlers.onCoverParticles) handlers.onCoverParticles(next);
+    persist("coverParticles", next);
+  });
+
   [sizeInput, offxInput, offyInput, angleInput, opacityInput].forEach((input) => {
     input.addEventListener("input", emitLayout);
   });
@@ -208,6 +216,10 @@ export function initChrome(handlers) {
   function setBloom(on) {
     bloomBtn.classList.toggle("active", on);
     bloomBtn.textContent = on ? "开" : "关";
+  }
+  function setCoverParticles(on) {
+    coverParticlesBtn.classList.toggle("active", on);
+    coverParticlesBtn.textContent = on ? "开" : "关";
   }
   function setColorMode(value) {
     pcolorButtons.forEach((button) => button.classList.toggle("active", parseInt(button.dataset.c, 10) === value));
@@ -282,6 +294,7 @@ export function initChrome(handlers) {
       setSource(s.libraryKind);
       setQualityValue(s.quality);
       setBloom(s.bloom === true);
+      setCoverParticles(s.coverParticles === true);
       setLyricsToggle(s.lyrics !== false);
       setLyricModeValue(s.lyricMode);
       if (typeof s.shelfSize === "number") sizeInput.value = s.shelfSize;

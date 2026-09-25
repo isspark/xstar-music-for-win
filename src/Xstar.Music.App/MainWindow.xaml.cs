@@ -51,6 +51,8 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
     private readonly List<TextBlock> _lyricBlocks = new();
     private readonly List<TextBlock> _cdLyricBlocks = new();
     private bool _cdLyrics;
+    // CD mode: whether the song title / artist overlay is shown (default hidden).
+    private bool _cdShowInfo;
     private double _lyricsFontSize = 14;
     private string _lyricFontFamily = "";
     private Color? _lyricActiveColor;
@@ -139,6 +141,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
     private double _threeDParticleCount = 1.0;
     private int _threeDParticleColorMode = 1;
     private string _threeDParticleColor = "";
+    private bool _threeDCoverParticles;
     private string? _threeDBackgroundData;
     private string _threeDBackgroundDataKey = "";
 
@@ -205,6 +208,9 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
 
     [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint dwFlags);
     [DllImport("user32.dll")] private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MonitorInfo lpmi);
+    [DllImport("user32.dll")] private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint flags);
+    private const uint SwpNoZOrder = 0x0004;
+    private const uint SwpNoActivate = 0x0010;
 
     public MainWindow()
     {
@@ -244,7 +250,8 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
         DiscLabelTexture.Source = BuildLabelTextureImage(140);
         UpdateDiscRotation();
         ApplyDisplayMode();
-        StateChanged += (_, _) => UpdateFrameClip();
+        StateChanged += (_, _) => { UpdateFrameClip(); SyncThreeDRunState(); };
+        IsVisibleChanged += (_, _) => SyncThreeDRunState();
         WindowFrame.SizeChanged += (_, _) => UpdateFrameClip();
         VisualizerView.SizeChanged += VisualizerView_SizeChanged;
         _vizControlsTimer.Tick += (_, _) => HideVisualizerControls();
@@ -348,10 +355,14 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
                 var info = new MonitorInfo { cbSize = Marshal.SizeOf<MonitorInfo>() };
                 if (GetMonitorInfo(monitor, ref info))
                 {
-                    mmi.ptMaxPosition.X = info.rcWork.Left - info.rcMonitor.Left;
-                    mmi.ptMaxPosition.Y = info.rcWork.Top - info.rcMonitor.Top;
-                    mmi.ptMaxSize.X = info.rcWork.Right - info.rcWork.Left;
-                    mmi.ptMaxSize.Y = info.rcWork.Bottom - info.rcWork.Top;
+                    // 3D mode maximizes to the whole monitor (true fullscreen, taskbar covered);
+                    // every other mode stays inside the work area so the taskbar remains usable.
+                    var full = string.Equals(_displayMode, "mode3d", StringComparison.OrdinalIgnoreCase);
+                    var rect = full ? info.rcMonitor : info.rcWork;
+                    mmi.ptMaxPosition.X = rect.Left - info.rcMonitor.Left;
+                    mmi.ptMaxPosition.Y = rect.Top - info.rcMonitor.Top;
+                    mmi.ptMaxSize.X = rect.Right - rect.Left;
+                    mmi.ptMaxSize.Y = rect.Bottom - rect.Top;
                     Marshal.StructureToPtr(mmi, lParam, true);
                 }
             }
@@ -508,6 +519,22 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
         Background = Brushes.Transparent;
         if (PresentationSource.FromVisual(this) is HwndSource source && source.CompositionTarget is not null)
             source.CompositionTarget.BackgroundColor = Colors.Transparent;
+    }
+
+    /// <summary>Re-applies the maximized bounds after a display-mode change: 3D mode fills the whole
+    /// monitor (true fullscreen), every other mode stays inside the work area.</summary>
+    private void ReapplyMaximizeBounds()
+    {
+        if (WindowState != WindowState.Maximized) return;
+        var handle = new WindowInteropHelper(this).Handle;
+        if (handle == IntPtr.Zero) return;
+        var monitor = MonitorFromWindow(handle, MonitorDefaultToNearest);
+        if (monitor == IntPtr.Zero) return;
+        var info = new MonitorInfo { cbSize = Marshal.SizeOf<MonitorInfo>() };
+        if (!GetMonitorInfo(monitor, ref info)) return;
+        var rect = string.Equals(_displayMode, "mode3d", StringComparison.OrdinalIgnoreCase) ? info.rcMonitor : info.rcWork;
+        SetWindowPos(handle, IntPtr.Zero, rect.Left, rect.Top, rect.Right - rect.Left, rect.Bottom - rect.Top,
+            SwpNoZOrder | SwpNoActivate);
     }
 
     private void UpdateFrameClip()
@@ -670,6 +697,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
                 _lyricsFontSize = state?.LyricsFontSize is > 0 ? state.LyricsFontSize : 14;
                 _dimLyrics = state?.DimLyrics ?? true;
                 _cdLyrics = state?.CdLyrics ?? false;
+                _cdShowInfo = state?.CdShowInfo ?? false;
                 _lyricFontFamily = state?.LyricFontFamily ?? "";
                 _lyricActiveColor = ParseColor(state?.LyricActiveColor);
                 _lyricInactiveColor = ParseColor(state?.LyricInactiveColor);
@@ -719,6 +747,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
                 _threeDParticleCount = state?.ThreeDParticleCount is > 0.2 and < 2 ? state.ThreeDParticleCount : 1.0;
                 _threeDParticleColorMode = state?.ThreeDParticleColorMode is >= 0 and <= 2 ? state.ThreeDParticleColorMode : 1;
                 _threeDParticleColor = state?.ThreeDParticleColor ?? "";
+                _threeDCoverParticles = state?.ThreeDCoverParticles ?? false;
                 _wallpaperEnabled = state?.WallpaperEnabled ?? false;
                 _wallpaperInteractive = state?.WallpaperInteractive ?? false;
             }
@@ -760,6 +789,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
                 LyricsFontSize = _lyricsFontSize,
                 DimLyrics = _dimLyrics,
                 CdLyrics = _cdLyrics,
+                CdShowInfo = _cdShowInfo,
                 LyricFontFamily = _lyricFontFamily,
                 LyricActiveColor = _lyricActiveColor is { } ac ? $"#{ac.A:X2}{ac.R:X2}{ac.G:X2}{ac.B:X2}" : null,
                 LyricInactiveColor = _lyricInactiveColor is { } ic ? $"#{ic.A:X2}{ic.R:X2}{ic.G:X2}{ic.B:X2}" : null,
@@ -806,6 +836,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
                 ThreeDParticleCount = _threeDParticleCount,
                 ThreeDParticleColorMode = _threeDParticleColorMode,
                 ThreeDParticleColor = _threeDParticleColor,
+                ThreeDCoverParticles = _threeDCoverParticles,
                 WallpaperEnabled = _wallpaperEnabled,
                 WallpaperInteractive = _wallpaperInteractive
             }));
@@ -1242,6 +1273,8 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
 
         DiscScale.ScaleX = scale;
         DiscScale.ScaleY = scale;
+        // Shrink the title / artist text along with the disc so they stay proportional.
+        UpdateCdInfoFonts(cd);
 
         if (DiscClickZones is not null)
         {
@@ -1265,6 +1298,16 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
 
         if (_discRotation && !_reduceMotion && _player.Snapshot.IsPlaying) _discClock.Resume();
         else _discClock.Pause();
+    }
+
+    /// <summary>Scales the title / artist text with the CD disc zoom so the names shrink together.</summary>
+    private void UpdateCdInfoFonts(bool cd)
+    {
+        var z = cd ? _cdZoom : 1.0;
+        if (TitleText is not null) TitleText.FontSize = 32 * z;
+        if (SubText is not null) SubText.FontSize = 15 * z;
+        if (CdTitleText is not null) CdTitleText.FontSize = 20 * z;
+        if (CdSubText is not null) CdSubText.FontSize = 12 * z;
     }
 
     private void AnimateNowPlaying()
@@ -1411,6 +1454,9 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
 
         // Visualizer view visibility
         VisualizerView.Visibility = viz ? Visibility.Visible : Visibility.Collapsed;
+        // Freeze the 3D page *before* collapsing its WebView2 — a collapsed view can be occluded
+        // and throttled by Chromium before the "active:false" message gets processed.
+        if (!mode3d) _threeDHost.Stop();
         ThreeDView.Visibility = mode3d ? Visibility.Visible : Visibility.Collapsed;
 
         TitleBarControl.Opacity = (cd || mode3d) ? 0 : 1;
@@ -1522,20 +1568,29 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
             CloseOverlays();
             StartThreeDMode();
         }
-        else
-        {
-            _threeDHost.Stop();
-        }
 
         ApplyVisualizerLyrics();
         ApplyCdWindow(cd);
         ApplyCdChrome(cd);
         ApplyCdLyrics();
+        ReapplyMaximizeBounds();
         UpdateFrameClip();
         UpdateDiscRotation();
     }
 
     /* ===================== 3D mode (WebView2 + Three.js) ===================== */
+
+    /// <summary>
+    /// Pauses the 3D render loop while the window is hidden (tray / translucent-hide) or minimized,
+    /// and resumes it once visible again, so an off-screen WebView2 never burns GPU/CPU. Uses
+    /// <see cref="ThreeDHost.Suspend"/> / <see cref="ThreeDHost.Resume"/> (no reload).
+    /// </summary>
+    private void SyncThreeDRunState()
+    {
+        if (!string.Equals(_displayMode, "mode3d", StringComparison.OrdinalIgnoreCase)) return;
+        if (IsVisible && WindowState != WindowState.Minimized) _threeDHost.Resume();
+        else _threeDHost.Suspend();
+    }
 
     private async void StartThreeDMode()
     {
@@ -1755,7 +1810,8 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
             Glow = _threeDGlow,
             ParticleCount = _threeDParticleCount,
             ParticleColorMode = _threeDParticleColorMode,
-            ParticleColor = _threeDParticleColor
+            ParticleColor = _threeDParticleColor,
+            CoverParticles = _threeDCoverParticles
         };
         return JsonSerializer.Serialize(message, ThreeDJson.Options);
     }
@@ -1950,6 +2006,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
                 case "particleCount": _threeDParticleCount = v.GetDouble(); break;
                 case "particleColorMode": _threeDParticleColorMode = v.GetInt32(); break;
                 case "particleColor": _threeDParticleColor = v.GetString() ?? ""; break;
+                case "coverParticles": _threeDCoverParticles = v.GetBoolean(); break;
                 case "wallpaperInteractive": _ = SetWallpaperInteractiveAsync(v.GetBoolean()); return;
                 default: return;
             }
@@ -1988,6 +2045,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
         _threeDParticleCount = 1.0;
         _threeDParticleColorMode = 1;
         _threeDParticleColor = "";
+        _threeDCoverParticles = false;
         SaveSettings();
         _threeDHost.PushSettings();
         _wallpaperController.PushSettings();
@@ -1998,10 +2056,15 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
     private void ApplyCdLyrics()
     {
         var cd = string.Equals(_displayMode, "cd", StringComparison.OrdinalIgnoreCase);
-        var show = cd && _cdLyrics;
-        CdLyricsOverlay.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
-        NowPlayingInfo.Visibility = show ? Visibility.Collapsed : Visibility.Visible;
-        if (show) UpdateLyricHighlight(force: true);
+        var showLyrics = cd && _cdLyrics;
+        CdLyricsOverlay.Visibility = showLyrics ? Visibility.Visible : Visibility.Collapsed;
+        // The title / artist header inside the lyrics overlay follows the show-info toggle.
+        CdInfoHeader.Visibility = (!cd || _cdShowInfo) ? Visibility.Visible : Visibility.Collapsed;
+        // The centred now-playing block shows in normal mode, or in CD mode with info enabled
+        // and the lyrics overlay hidden.
+        var showInfo = !showLyrics && (!cd || _cdShowInfo);
+        NowPlayingInfo.Visibility = showInfo ? Visibility.Visible : Visibility.Collapsed;
+        if (showLyrics) UpdateLyricHighlight(force: true);
     }
 
     /// <summary>Removes the OS window frame (Windows 11 border + rounded corners) so no edge is drawn.</summary>
@@ -2171,8 +2234,18 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
 
     private void CdMenu_Opened(object sender, RoutedEventArgs e)
     {
-        if (sender is ContextMenu menu && menu.Items.Count > 0 && menu.Items[0] is MenuItem item)
-            item.Header = _cdLyrics ? "隐藏歌词" : "显示歌词";
+        if (sender is not ContextMenu menu) return;
+        if (menu.Items.Count > 0 && menu.Items[0] is MenuItem infoItem)
+            infoItem.Header = _cdShowInfo ? "隐藏歌曲信息" : "显示歌曲信息";
+        if (menu.Items.Count > 1 && menu.Items[1] is MenuItem lyricsItem)
+            lyricsItem.Header = _cdLyrics ? "隐藏歌词" : "显示歌词";
+    }
+
+    private void CdInfoToggle_Click(object sender, RoutedEventArgs e)
+    {
+        _cdShowInfo = !_cdShowInfo;
+        ApplyCdLyrics();
+        SaveSettings();
     }
 
     private void CdLyricsToggle_Click(object sender, RoutedEventArgs e)
@@ -4140,6 +4213,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
         public double LyricsFontSize { get; set; } = 14;
         public bool DimLyrics { get; set; } = true;
         public bool CdLyrics { get; set; }
+        public bool CdShowInfo { get; set; }
         public string LyricFontFamily { get; set; } = "";
         public string? LyricActiveColor { get; set; }
         public string? LyricInactiveColor { get; set; }
@@ -4186,6 +4260,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
         public double ThreeDParticleCount { get; set; } = 1.0;
         public int ThreeDParticleColorMode { get; set; } = 1;
         public string ThreeDParticleColor { get; set; } = "";
+        public bool ThreeDCoverParticles { get; set; }
         public bool WallpaperEnabled { get; set; }
         public bool WallpaperInteractive { get; set; }
     }

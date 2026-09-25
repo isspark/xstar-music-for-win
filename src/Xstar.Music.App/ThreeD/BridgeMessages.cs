@@ -135,6 +135,8 @@ public sealed class ThreeDSettingsMessage
     public double ParticleCount { get; init; } = 1.0;
     public int ParticleColorMode { get; init; } = 1;
     public string? ParticleColor { get; init; }
+    /// <summary>When true the particle cloud is shaped by the album cover instead of title/lyrics text.</summary>
+    public bool CoverParticles { get; init; }
 }
 
 /// <summary>Message sent by the web view to C# (action dispatch).</summary>

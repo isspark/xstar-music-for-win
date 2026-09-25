@@ -318,12 +318,16 @@ export function createCover(scene, grid, accentHex) {
   let titleValue = "";
   let imageTexture = null;
   let overrideText = null;
+  let preferCover = false;
 
-  /* Picks the particle mask: an explicit lyric line wins, then the cover, then the song title. */
+  /* Picks the particle mask: cover image when it must win, then an explicit lyric line,
+     then the cover, then the song title. */
   function refreshCover() {
-    const next = overrideText
-      ? makePlaceholder(accentHexValue, overrideText)
-      : imageTexture || makePlaceholder(accentHexValue, titleValue);
+    const next = preferCover && imageTexture
+      ? imageTexture
+      : overrideText
+        ? makePlaceholder(accentHexValue, overrideText)
+        : imageTexture || makePlaceholder(accentHexValue, titleValue);
     if (next === currentTexture) return;
     const previous = currentTexture;
     material.uniforms.uCover.value = next;
@@ -376,6 +380,13 @@ export function createCover(scene, grid, accentHex) {
       const next = (text || "").trim() || null;
       if (next === overrideText) return;
       overrideText = next;
+      refreshCover();
+    },
+    /* When on, the cloud is always shaped by the album cover (falls back to text without one). */
+    setPreferCover(on) {
+      const next = on === true;
+      if (next === preferCover) return;
+      preferCover = next;
       refreshCover();
     },
     clearImage() {

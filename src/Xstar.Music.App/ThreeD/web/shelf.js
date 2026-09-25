@@ -269,15 +269,20 @@ export function createShelf(opts) {
   canvas.addEventListener(
     "wheel",
     (event) => {
-      const overDetail = detailData && pickDetail(event);
-      if (overDetail) {
+      updateNdc(event);
+      if (detailData && pickDetail(event)) {
         scrollDetail(event.deltaY > 0 ? 1 : -1);
         event.preventDefault();
         return;
       }
-      if (inShelfZone(event.clientX)) {
-        step(event.deltaY > 0 ? 1 : -1);
-        event.preventDefault();
+      // When the shelf is on screen, a wheel over it should step the carousel (not zoom the camera).
+      if (visibility > 0.35) {
+        const meshes = slots.filter((s) => s.mesh.visible).map((s) => s.mesh);
+        const overCard = !!pick(meshes);
+        if (overCard || inShelfZone(event.clientX)) {
+          step(event.deltaY > 0 ? 1 : -1);
+          event.preventDefault();
+        }
       }
     },
     { passive: false }
@@ -331,7 +336,8 @@ export function createShelf(opts) {
   }
 
   function inShelfZone(clientX) {
-    return clientX > viewport.w * 0.66;
+    // Side layout keeps a right-hand lane; the stage layout is a bottom row, so only card hits count.
+    return mode === "side" && clientX > viewport.w * 0.55;
   }
 
   /* ---------------- public API ---------------- */
@@ -357,6 +363,8 @@ export function createShelf(opts) {
   return {
     group,
     get detailOpen() { return !!detailData; },
+    /** 0..1 how visible the shelf currently is (smoothed). */
+    get visibility() { return visibility; },
 
     setViewport(w, h) {
       viewport.w = w;

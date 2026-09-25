@@ -100,10 +100,7 @@ public sealed class ThreeDHost : IDisposable
             }
         }
 
-        _pump.Reset();
-        _lastTick = DateTime.Now;
-        _ticksSinceState = 0;
-        _timer.Start();
+        StartLoop();
         PushArtwork();
         PushLyrics();
         PushLyricIndex();
@@ -129,8 +126,35 @@ public sealed class ThreeDHost : IDisposable
     {
         // A collapsed WebView2 keeps running its requestAnimationFrame loop, so tell the page to
         // freeze — otherwise the GPU stays busy after leaving 3D mode.
+        Suspend();
+    }
+
+    /// <summary>
+    /// Freezes the page render loop and stops the audio/state push timer while the view is off
+    /// screen (window hidden to tray, translucent-hide or minimized). The WebView2 stays loaded,
+    /// so resuming is cheap. The page's <c>active</c> flag is the only thing that halts its
+    /// self-scheduling <c>requestAnimationFrame</c> loop.
+    /// </summary>
+    public void Suspend()
+    {
         PushActive(false);
         _timer.Stop();
+    }
+
+    /// <summary>Resumes the page render loop and push timer after <see cref="Suspend"/>.</summary>
+    public void Resume()
+    {
+        if (_core is null) return;
+        StartLoop();
+        PushActive(true);
+    }
+
+    private void StartLoop()
+    {
+        _pump.Reset();
+        _lastTick = DateTime.Now;
+        _ticksSinceState = 0;
+        _timer.Start();
     }
 
     /// <summary>Pauses / resumes the page's render loop.</summary>
