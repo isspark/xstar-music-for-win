@@ -63,6 +63,9 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
     private string _displayMode = "normal";
     private double _discSize = 1.2;
     private double _discSpeed = 26;
+    // CD mode has its own rotation toggle / speed so it can differ from the plain now-playing disc.
+    private bool _cdRotation = true;
+    private double _cdSpeed = 26;
     // CD mode: user zoom of the disc inside the (fixed) window. 1.0 = fills the window.
     private double _cdZoom = 1.0;
     private const double CdZoomMin = 0.1;
@@ -705,6 +708,8 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
                 _displayMode = state?.DisplayMode ?? "normal";
                 _discSize = state?.DiscSize is > 0 ? state.DiscSize : 1.2;
                 _discSpeed = state?.DiscSpeed is > 0 ? state.DiscSpeed : 26;
+                _cdRotation = state?.CdRotation ?? true;
+                _cdSpeed = state?.CdSpeed is > 0 ? state.CdSpeed : 26;
                 _cdZoom = state?.CdZoom is > 0 ? Math.Clamp(state.CdZoom, CdZoomMin, CdZoomMax) : 1.0;
                 _windowOpacity = state?.WindowOpacity is >= 0 and <= 1 ? state.WindowOpacity : 1.0;
                 _hideTitleBrand = state?.HideTitleBrand ?? false;
@@ -797,6 +802,8 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
                 DisplayMode = _displayMode,
                 DiscSize = _discSize,
                 DiscSpeed = _discSpeed,
+                CdRotation = _cdRotation,
+                CdSpeed = _cdSpeed,
                 CdZoom = _cdZoom,
                 WindowOpacity = _windowOpacity,
                 HideTitleBrand = _hideTitleBrand,
@@ -882,7 +889,8 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
             // Heavy work off UI thread
             var snapshot = await Task.Run(async () =>
             {
-                var scanned = await _scanner.ScanAsync(_folders, progress, cts.Token);
+                var cachedSongs = _database.ReadSongs();
+                var scanned = await _scanner.ScanAsync(_folders, progress, cts.Token, cachedSongs);
                 cts.Token.ThrowIfCancellationRequested();
 
                 _database.UpsertSongs(scanned);
@@ -1287,16 +1295,25 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
 
         if (!show) return;
 
-        if (_discClock is null || Math.Abs(_discClockSpeed - _discSpeed) > 0.01)
+        // CD mode keeps its own rotation toggle and speed.
+        var rotation = cd ? _cdRotation : _discRotation;
+        var speed = cd ? _cdSpeed : _discSpeed;
+
+        if (_discClock is null || Math.Abs(_discClockSpeed - speed) > 0.01)
         {
-            var anim = new DoubleAnimation(0, 360, TimeSpan.FromSeconds(_discSpeed)) { RepeatBehavior = RepeatBehavior.Forever };
+            var anim = new DoubleAnimation(0, 360, TimeSpan.FromSeconds(speed)) { RepeatBehavior = RepeatBehavior.Forever };
+            // The window is a layered (AllowsTransparency) one, so every animation frame repaints the
+            // whole surface in software — a spinning disc at 60fps is a real CPU/GPU tax. Pick the
+            // lowest frame rate that still hides the stepping: keep each frame under ~1.5 degrees.
+            var discFps = (int)Math.Round(360.0 / (Math.Max(1.0, speed) * 1.5));
+            Timeline.SetDesiredFrameRate(anim, Math.Clamp(discFps, 6, 30));
             var clock = anim.CreateClock();
             DiscRotate.ApplyAnimationClock(RotateTransform.AngleProperty, clock);
             _discClock = clock.Controller;
-            _discClockSpeed = _discSpeed;
+            _discClockSpeed = speed;
         }
 
-        if (_discRotation && !_reduceMotion && _player.Snapshot.IsPlaying) _discClock.Resume();
+        if (rotation && !_reduceMotion && _player.Snapshot.IsPlaying) _discClock.Resume();
         else _discClock.Pause();
     }
 
@@ -3721,13 +3738,16 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
         SettingsBody.Children.Add(Card("播放界面", display));
 
         var disc = new StackPanel();
-        disc.Children.Add(Field("唱片旋转", "播放时缓慢旋转光碟", Switch(_discRotation, value => { _discRotation = value; SaveSettings(); UpdateDiscRotation(); })));
+        disc.Children.Add(Field("唱片旋转", "普通模式播放时缓慢旋转光碟", Switch(_discRotation, value => { _discRotation = value; SaveSettings(); UpdateDiscRotation(); })));
+        disc.Children.Add(SliderRow("转动速度", "普通模式转速，数值越小转得越快（秒 / 圈）", 4, 60, 1, _discSpeed,
+            v => $"{v:0} 秒/圈", value => { _discSpeed = value; SaveSettings(); UpdateDiscRotation(); }));
+        disc.Children.Add(Field("CD 旋转", "CD 模式播放时缓慢旋转唱片", Switch(_cdRotation, value => { _cdRotation = value; SaveSettings(); UpdateDiscRotation(); })));
+        disc.Children.Add(SliderRow("CD 转动速度", "CD 模式转速，数值越小转得越快（秒 / 圈）", 4, 60, 1, _cdSpeed,
+            v => $"{v:0} 秒/圈", value => { _cdSpeed = value; SaveSettings(); UpdateDiscRotation(); }));
         disc.Children.Add(SliderRow("光碟大小", "普通模式下光碟的显示比例（CD 模式请用滚轮缩放）", 0.8, 1.5, 0.05, _discSize,
             v => $"{v * 100:0}%", value => { _discSize = value; SaveSettings(); UpdateDiscRotation(); }));
         disc.Children.Add(SliderRow("CD 缩放", "CD 模式唱片大小（窗口内滚轮 / 双指缩放，100% 填满窗口）", CdZoomMin * 100, CdZoomMax * 100, 5, _cdZoom * 100,
             v => $"{v:0}%", value => { SetCdZoom(value / 100.0); }));
-        disc.Children.Add(SliderRow("转动速度", "数值越小转得越快（秒 / 圈）", 4, 60, 1, _discSpeed,
-            v => $"{v:0} 秒/圈", value => { _discSpeed = value; SaveSettings(); UpdateDiscRotation(); }));
         SettingsBody.Children.Add(Card("唱片", disc));
 
         var window = new StackPanel();
@@ -4221,6 +4241,8 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
         public string DisplayMode { get; set; } = "normal";
         public double DiscSize { get; set; } = 1.2;
         public double DiscSpeed { get; set; } = 26;
+        public bool CdRotation { get; set; } = true;
+        public double CdSpeed { get; set; } = 26;
         public double CdZoom { get; set; } = 1.0;
         public double WindowOpacity { get; set; } = 1.0;
         public bool HideTitleBrand { get; set; }

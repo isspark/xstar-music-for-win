@@ -294,7 +294,8 @@
         </Grid.RowDefinitions>
 
         <!-- Ambient background spans title bar + stage so both share the same colour -->
-        <Border x:Name="NpBackground" Grid.RowSpan="2" Width="900" Height="900" CornerRadius="450" Opacity="0.5" IsHitTestVisible="False" HorizontalAlignment="Center" VerticalAlignment="Center">
+        <Border x:Name="NpBackground" Grid.RowSpan="2" Width="900" Height="900" CornerRadius="450" Opacity="0.5" IsHitTestVisible="False" HorizontalAlignment="Center" VerticalAlignment="Center"
+                CacheMode="BitmapCache">
             <Border.Effect><BlurEffect Radius="90" KernelType="Gaussian"/></Border.Effect>
         </Border>
 
