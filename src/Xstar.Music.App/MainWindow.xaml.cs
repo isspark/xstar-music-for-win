@@ -37,6 +37,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
     private CancellationTokenSource? _scanDebounce;
     private readonly SemaphoreSlim _scanGate = new(1, 1);
     private bool _scanning;
+    private bool _scanSilent;
     private CancellationTokenSource? _scanCts;
     private int _currentIndex = -1;
     private bool _draggingProgress;
@@ -764,7 +765,14 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
             ModeGlyphText.Text = ModeGlyph(_playbackMode);
             _player.SetMode(_playbackMode);
             UpdateOnlineButton();
-            if (_folders.Count > 0) await ScanAsync();
+            if (_folders.Count > 0)
+            {
+                // Show the persisted library instantly, then reconcile with disk in the
+                // background. Only a first run (empty index) shows a visible scan.
+                await ApplyDatabaseSnapshotAsync();
+                if (_songs.Count == 0) await ScanAsync();
+                else _ = ScanAsync(silent: true);
+            }
             else RenderQueue();
             UpdateDiscRotation();
             SyncVisualizerTheme();
@@ -853,7 +861,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
 
     /* ===================== scanning ===================== */
 
-    private async Task ScanAsync()
+    private async Task ScanAsync(bool silent = false)
     {
         // Cancel any previous scan (debounce + running)
         _scanDebounce?.Cancel();
@@ -865,7 +873,10 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
         var cts = new CancellationTokenSource();
         _scanCts = cts;
         _scanning = true;
-        OnScanStatusChanged(true);
+        _scanSilent = silent;
+        // Background / startup reconciliation runs silently so the UI never claims
+        // it is "scanning" when the persisted library is already up to date.
+        if (!silent) OnScanStatusChanged(true);
 
         try
         {
@@ -877,7 +888,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
                 return;
             }
 
-            var progress = new Progress<(int Done, int Total, string Status)>(p =>
+            var progress = silent ? null : new Progress<(int Done, int Total, string Status)>(p =>
             {
                 if (_settingsScanProgress == null) return;
                 _settingsScanProgress.Maximum = Math.Max(p.Total, 1);
@@ -893,48 +904,33 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
                 var scanned = await _scanner.ScanAsync(_folders, progress, cts.Token, cachedSongs);
                 cts.Token.ThrowIfCancellationRequested();
 
+                // Nothing changed on disk → keep the persisted index and skip the
+                // write + UI reload (the common case on restart / watcher events).
+                if (LibraryUnchanged(cachedSongs, scanned)) return null;
+
                 _database.UpsertSongs(scanned);
                 _database.ReplaceScanFiles(scanned.Select(song => song.Path));
                 _database.RemoveMissingFiles();
-
-                var favorites = _database.ReadFavoriteIds();
-                var histories = _database.ReadHistory();
-                var playlists = _database.ReadPlaylists();
-                var playlistSongs = new Dictionary<int, HashSet<string>>();
-                foreach (var p in playlists) playlistSongs[p.Id] = _database.ReadPlaylistSongIds(p.Id);
-
-                var dbSongs = _database.ReadSongs();
-                var rows = new List<SongRow>(dbSongs.Count);
-                var idx = 1;
-                foreach (var song in dbSongs)
-                    rows.Add(new SongRow(song, idx++) { IsFavorite = favorites.Contains(song.Id) });
-                return (rows, favorites, histories, playlists, playlistSongs);
+                return ReadLibrarySnapshot();
             }, cts.Token);
 
-            // Apply on UI thread
-            if (_settingsScanStatus != null) _settingsScanStatus.Text = "正在刷新界面…";
-            _favoriteIds = snapshot.favorites;
-            _historyTicks = snapshot.histories;
-            _playlists = snapshot.playlists;
-            _playlistSongs.Clear();
-            foreach (var kv in snapshot.playlistSongs) _playlistSongs[kv.Key] = kv.Value;
-            _songs.Clear();
-            foreach (var row in snapshot.rows) _songs.Add(row);
-            RenderQueue();
-            RenderLibrary();
-            ConfigureWatchers();
-            if (!_restoredOnce) { _restoredOnce = true; RestorePlayback(); }
-            if (_settingsScanStatus != null) _settingsScanStatus.Text = $"完成，共 {snapshot.rows.Count} 首";
-            SaveSettings();
+            if (snapshot is not null)
+            {
+                // Apply on UI thread
+                if (!silent && _settingsScanStatus != null) _settingsScanStatus.Text = "正在刷新界面…";
+                ApplyLibrarySnapshot(snapshot);
+                if (!silent && _settingsScanStatus != null) _settingsScanStatus.Text = $"完成，共 {snapshot.Rows.Count} 首";
+                SaveSettings();
+            }
         }
         catch (OperationCanceledException)
         {
-            if (_settingsScanStatus != null) _settingsScanStatus.Text = "已取消";
+            if (!silent && _settingsScanStatus != null) _settingsScanStatus.Text = "已取消";
         }
         catch (Exception ex)
         {
-            if (_settingsScanStatus != null) _settingsScanStatus.Text = "扫描失败";
-            MessageBox.Show($"扫描失败：{ex.Message}\n\n{ex}", "扫描失败", MessageBoxButton.OK, MessageBoxImage.Warning);
+            if (!silent && _settingsScanStatus != null) _settingsScanStatus.Text = "扫描失败";
+            if (!silent) MessageBox.Show($"扫描失败：{ex.Message}\n\n{ex}", "扫描失败", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
         finally
         {
@@ -979,16 +975,86 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
         foreach (var playlist in _playlists) _playlistSongs[playlist.Id] = _database.ReadPlaylistSongIds(playlist.Id);
     }
 
+    private sealed record LibrarySnapshot(
+        List<SongRow> Rows,
+        HashSet<string> Favorites,
+        Dictionary<string, long> Histories,
+        List<(int Id, string Name)> Playlists,
+        Dictionary<int, HashSet<string>> PlaylistSongs);
+
+    /// <summary>
+    /// True when the scan reused every persisted song (same paths, same size/timestamp),
+    /// meaning nothing on disk changed and the index needs no rewrite.
+    /// </summary>
+    private static bool LibraryUnchanged(List<Song> cached, IReadOnlyList<Song> scanned)
+    {
+        if (cached.Count != scanned.Count) return false;
+        var byPath = cached.ToDictionary(song => song.Path, StringComparer.OrdinalIgnoreCase);
+        foreach (var song in scanned)
+            if (!byPath.TryGetValue(song.Path, out var old) || !ReferenceEquals(old, song)) return false;
+        return true;
+    }
+
+    /// <summary>Reads the full library view (songs + favorites + history + playlists) off the UI thread.</summary>
+    private LibrarySnapshot ReadLibrarySnapshot()
+    {
+        var favorites = _database.ReadFavoriteIds();
+        var histories = _database.ReadHistory();
+        var playlists = _database.ReadPlaylists();
+        var playlistSongs = new Dictionary<int, HashSet<string>>();
+        foreach (var p in playlists) playlistSongs[p.Id] = _database.ReadPlaylistSongIds(p.Id);
+
+        var dbSongs = _database.ReadSongs();
+        var rows = new List<SongRow>(dbSongs.Count);
+        var idx = 1;
+        foreach (var song in dbSongs)
+            rows.Add(new SongRow(song, idx++) { IsFavorite = favorites.Contains(song.Id) });
+        return new LibrarySnapshot(rows, favorites, histories, playlists, playlistSongs);
+    }
+
+    /// <summary>Applies a snapshot to the UI (must run on the UI thread).</summary>
+    private void ApplyLibrarySnapshot(LibrarySnapshot snapshot)
+    {
+        _favoriteIds = snapshot.Favorites;
+        _historyTicks = snapshot.Histories;
+        _playlists = snapshot.Playlists;
+        _playlistSongs.Clear();
+        foreach (var kv in snapshot.PlaylistSongs) _playlistSongs[kv.Key] = kv.Value;
+        _songs.Clear();
+        foreach (var row in snapshot.Rows) _songs.Add(row);
+        RenderQueue();
+        RenderLibrary();
+        ConfigureWatchers();
+        if (!_restoredOnce) { _restoredOnce = true; RestorePlayback(); }
+    }
+
+    /// <summary>
+    /// Renders the persisted library immediately (no folder enumeration) so a restart shows
+    /// the songs right away instead of waiting on a scan.
+    /// </summary>
+    private async Task ApplyDatabaseSnapshotAsync()
+    {
+        var snapshot = await Task.Run(ReadLibrarySnapshot);
+        ApplyLibrarySnapshot(snapshot);
+    }
+
     private void RestorePlayback()
     {
         if (_songs.Count == 0) return;
         var rows = _songs.ToList();
-        var restoredRows = _restoredQueue
-            .Select(path => rows.FirstOrDefault(row => row.Song.Path.Equals(path, StringComparison.OrdinalIgnoreCase)))
-            .Where(row => row is not null)
-            .Cast<SongRow>()
-            .ToList();
-        foreach (var row in rows.Where(row => !restoredRows.Contains(row))) restoredRows.Add(row);
+
+        // Index by path once. The saved queue can hold tens of thousands of paths;
+        // a linear scan per entry (O(n²)) freezes the UI on large libraries.
+        var byPath = new Dictionary<string, SongRow>(rows.Count, StringComparer.OrdinalIgnoreCase);
+        foreach (var row in rows) byPath.TryAdd(row.Song.Path, row);
+
+        var restoredRows = new List<SongRow>(rows.Count);
+        var seen = new HashSet<SongRow>();
+        foreach (var path in _restoredQueue)
+            if (byPath.TryGetValue(path, out var row) && seen.Add(row)) restoredRows.Add(row);
+        foreach (var row in rows)
+            if (seen.Add(row)) restoredRows.Add(row);
+
         if (restoredRows.Count == rows.Count)
         {
             _songs.Clear();
@@ -3664,7 +3730,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
 
         // 扫描进度提示（仅扫描时显示在“重新扫描”下方）
         _settingsScanArea = new StackPanel { Visibility = Visibility.Collapsed, Margin = new Thickness(0, 14, 0, 0) };
-        if (_scanning) _settingsScanArea.Visibility = Visibility.Visible;
+        if (_scanning && !_scanSilent) _settingsScanArea.Visibility = Visibility.Visible;
         _settingsScanStatus = new TextBlock { Text = "正在扫描…", FontSize = 11.5, Foreground = ResBrush("TextSecondaryBrush"), Margin = new Thickness(0, 0, 0, 4) };
         _settingsScanCount = new TextBlock { FontSize = 10.5, Foreground = ResBrush("TextMutedBrush") };
         _settingsScanProgress = new ProgressBar { Height = 4, Maximum = 1, Margin = new Thickness(0, 8, 0, 0) };
@@ -4196,7 +4262,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IThreeDActions
         {
             await Task.Delay(700, cancellationToken);
             if (!cancellationToken.IsCancellationRequested)
-                await Dispatcher.InvokeAsync(ScanAsync);
+                await Dispatcher.InvokeAsync(() => ScanAsync(silent: true));
         }
         catch (OperationCanceledException) { }
     }
